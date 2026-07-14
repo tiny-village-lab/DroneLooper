@@ -54,7 +54,10 @@ MainComponent::MainComponent()
     // bounds.
     setSize(1200, 780);
 
-    setAudioChannels(1, 2);
+    // On demande deux canaux d'entrée ; le périphérique n'en fournira
+    // peut-être qu'un (micro d'iPad, par exemple). prepareToPlay lit le
+    // nombre réel et s'y adapte.
+    setAudioChannels(2, 2);
 
     // Rafraîchit l'interface environ 30 fois par seconde.
     startTimerHz(30);
@@ -115,6 +118,26 @@ void MainComponent::prepareToPlay(
     double sampleRate
 )
 {
+    activeInputChannels = 1;
+
+    if (auto* device = deviceManager.getCurrentAudioDevice())
+    {
+        activeInputChannels = juce::jmax(
+            1,
+            device->getActiveInputChannels().countNumberOfSetBits()
+        );
+    }
+
+    monoInputBuffer.setSize(
+        1,
+        samplesPerBlockExpected,
+        false,
+        true,
+        false
+    );
+
+    monoInputBuffer.clear();
+
     historyBufferSize = static_cast<int>(
         sampleRate * historyDurationSeconds
     );
@@ -179,19 +202,28 @@ void MainComponent::getNextAudioBlock(
     const int startSample = bufferToFill.startSample;
     const int numberOfSamples = bufferToFill.numSamples;
 
-    // L'entrée est encore dans le buffer : on la consomme d'abord.
-    const float rms = buffer->getRMSLevel(
-        0,
-        startSample,
-        numberOfSamples
-    );
+    // Le scratch mono est pré-alloué : si le bloc dépasse la taille
+    // annoncée, on sort en silence plutôt que de déborder.
+    if (numberOfSamples > monoInputBuffer.getNumSamples())
+    {
+        buffer->clear(startSample, numberOfSamples);
+
+        return;
+    }
+
+    // L'entrée est encore dans le buffer : on la consomme d'abord, en
+    // la réduisant à un canal.
+    buildMonoInput(*buffer, startSample, numberOfSamples);
+
+    const float rms =
+        monoInputBuffer.getRMSLevel(0, 0, numberOfSamples);
 
     inputLevel.store(rms);
 
-    writeInputToHistory(*buffer, startSample, numberOfSamples);
+    writeInputToHistory(monoInputBuffer, 0, numberOfSamples);
 
     if (isRecording.load())
-        appendToRecording(*buffer, startSample, numberOfSamples);
+        appendToRecording(monoInputBuffer, 0, numberOfSamples);
 
     if (isPlaying.load())
     {
@@ -229,18 +261,61 @@ void MainComponent::getNextAudioBlock(
         juce::dsp::ProcessContextReplacing<float> context(subBlock);
         limiter.process(context);
     }
-    else if (buffer->getNumChannels() >= 2)
+    else
     {
-        // Monitoring d'entrée : dual-mono à l'unité, non traité.
-        buffer->copyFrom(
-            1,
-            startSample,
-            *buffer,
-            0,
-            startSample,
-            numberOfSamples
-        );
+        // Monitoring d'entrée : l'entrée mono à l'unité sur les deux
+        // canaux, non traitée.
+        for (int channel = 0;
+             channel < buffer->getNumChannels();
+             ++channel)
+        {
+            buffer->copyFrom(
+                channel,
+                startSample,
+                monoInputBuffer,
+                0,
+                0,
+                numberOfSamples
+            );
+        }
     }
+}
+
+void MainComponent::buildMonoInput(
+    const juce::AudioBuffer<float>& inputBuffer,
+    int startSample,
+    int numberOfSamples
+)
+{
+    auto* mono = monoInputBuffer.getWritePointer(0);
+
+    if (inputBuffer.getNumChannels() <= 0)
+    {
+        juce::FloatVectorOperations::clear(mono, numberOfSamples);
+
+        return;
+    }
+
+    // Entrée stéréo : on somme L+R plutôt que d'ignorer la droite. Le
+    // facteur 0,5 évite la saturation quand les deux canaux sont
+    // corrélés (cas fréquent).
+    if (activeInputChannels >= 2 && inputBuffer.getNumChannels() >= 2)
+    {
+        const auto* left = inputBuffer.getReadPointer(0, startSample);
+        const auto* right = inputBuffer.getReadPointer(1, startSample);
+
+        for (int i = 0; i < numberOfSamples; ++i)
+            mono[i] = 0.5f * (left[i] + right[i]);
+
+        return;
+    }
+
+    // Entrée mono : copie directe.
+    juce::FloatVectorOperations::copy(
+        mono,
+        inputBuffer.getReadPointer(0, startSample),
+        numberOfSamples
+    );
 }
 
 void MainComponent::releaseResources()

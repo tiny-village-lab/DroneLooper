@@ -43,6 +43,17 @@ private:
     void toggleRecording();
 
     // --- Thread audio ---
+
+    // Réduit l'entrée à un seul canal dans monoInputBuffer : si le
+    // périphérique fournit deux canaux, on somme L+R plutôt que
+    // d'ignorer la droite. Tout le moteur travaille ensuite en mono ;
+    // la stéréo naît du panoramique des voix.
+    void buildMonoInput(
+        const juce::AudioBuffer<float>& inputBuffer,
+        int startSample,
+        int numberOfSamples
+    );
+
     void writeInputToHistory(
         const juce::AudioBuffer<float>& sourceBuffer,
         int sourceStartSample,
@@ -79,6 +90,14 @@ private:
     std::atomic<float> inputLevel { 0.0f };
     float displayedLevel = 0.0f;
     juce::Rectangle<int> meterArea;
+
+    // Nombre de canaux réellement fournis par le périphérique, relu à
+    // chaque prepareToPlay : brancher une interface stéréo en cours de
+    // route est donc pris en compte.
+    int activeInputChannels = 1;
+
+    // L'entrée, réduite à un canal.
+    juce::AudioBuffer<float> monoInputBuffer;
 
     // Historique glissant de l'entrée (non exploité pour l'instant).
     juce::AudioBuffer<float> inputHistoryBuffer;
