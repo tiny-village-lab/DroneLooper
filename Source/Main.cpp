@@ -55,8 +55,8 @@ public:
         speedSlider.setSliderStyle(juce::Slider::LinearHorizontal);
 
         // Slider cranté : chaque pas entier = un demi-ton.
-        // 0 = arrêt ; +/- = avant/inversé. 25 crans par côté
-        // (demi-tons -12..+12).
+        // 0 = arrêt ; +/- = avant/inversé. 73 crans par côté
+        // (demi-tons -36..+36).
         speedSlider.setRange(
             -(2 * semitoneRange + 1),
             2 * semitoneRange + 1,
@@ -70,17 +70,35 @@ public:
             return speedText(static_cast<int>(std::round(value)));
         };
 
-        speedSlider.onValueChange = [this]
-        {
-            playbackSpeed.store(
-                speedFromIndex(
-                    static_cast<int>(std::round(speedSlider.getValue()))
-                )
-            );
-        };
+        speedSlider.onValueChange = [this] { updatePlaybackSpeed(); };
 
-        // Défaut : +13 -> 0 demi-ton -> vitesse normale (1x).
+        // Potard de réglage fin : +/- un demi-demi-ton, appliqué en
+        // décalage fractionnaire sur la vitesse de lecture.
+        addAndMakeVisible(fineTuneSlider);
+        fineTuneSlider.setSliderStyle(
+            juce::Slider::RotaryHorizontalVerticalDrag
+        );
+        fineTuneSlider.setRange(-0.5, 0.5, 0.01);
+        fineTuneSlider.setValue(0.0);
+        fineTuneSlider.setDoubleClickReturnValue(true, 0.0);
+        fineTuneSlider.setTextBoxStyle(
+            juce::Slider::TextBoxBelow,
+            false,
+            70,
+            18
+        );
+
+        fineTuneSlider.onValueChange = [this] { updatePlaybackSpeed(); };
+
+        addAndMakeVisible(fineTuneLabel);
+        fineTuneLabel.setText("Fin", juce::dontSendNotification);
+        fineTuneLabel.setJustificationType(juce::Justification::centred);
+        fineTuneLabel.attachToComponent(&fineTuneSlider, false);
+
+        // Défaut : +37 -> 0 demi-ton -> vitesse normale (1x).
         speedSlider.setValue(semitoneRange + 1);
+
+        updatePlaybackSpeed();
 
         addAndMakeVisible(speedLabel);
         speedLabel.setText("Vitesse", juce::dontSendNotification);
@@ -218,7 +236,7 @@ public:
         );
 
         auto bounds = getLocalBounds();
-        bounds.removeFromBottom(160); // Espace réservé slider + bouton.
+        bounds.removeFromBottom(200); // Espace réservé contrôles.
         bounds = bounds.reduced(40);
 
         graphics.setColour(juce::Colours::white);
@@ -253,7 +271,7 @@ public:
     {
         auto area = getLocalBounds();
 
-        auto bottomStrip = area.removeFromBottom(160);
+        auto bottomStrip = area.removeFromBottom(200);
 
         auto buttonRow = bottomStrip.removeFromBottom(70);
 
@@ -261,8 +279,14 @@ public:
             buttonRow.withSizeKeepingCentre(200, 40)
         );
 
+        auto knobColumn = bottomStrip.removeFromRight(130);
+
+        fineTuneSlider.setBounds(
+            knobColumn.reduced(15, 25)
+        );
+
         speedSlider.setBounds(
-            bottomStrip.reduced(40, 20)
+            bottomStrip.reduced(40, 25)
         );
     }
 
@@ -341,21 +365,37 @@ private:
         recordingWritePosition += samplesToCopy;
     }
 
-    // Convertit l'index du slider en vitesse de lecture.
-    // 0 -> arrêt ; sinon |index| donne le demi-ton (magnitude - 13 =>
-    // -12..+12) et le signe donne le sens (avant / inversé).
-    static float speedFromIndex(int index)
+    // Convertit l'index du slider (+ le réglage fin) en vitesse de
+    // lecture. 0 -> arrêt ; sinon |index| donne le demi-ton
+    // (magnitude - 37 => -36..+36), le réglage fin ajoute une fraction
+    // de demi-ton, et le signe donne le sens (avant / inversé).
+    static float speedFrom(int index, float fineTuneSemitones)
     {
         if (index == 0)
             return 0.0f;
 
-        const int magnitude = std::abs(index);       // 1..25
-        const int semitones = magnitude - (semitoneRange + 1); // -12..+12
+        const int magnitude = std::abs(index);       // 1..73
+        const int semitones = magnitude - (semitoneRange + 1); // -36..+36
 
-        const float ratio =
-            std::pow(2.0f, static_cast<float>(semitones) / 12.0f);
+        const float totalSemitones =
+            static_cast<float>(semitones) + fineTuneSemitones;
+
+        const float ratio = std::pow(2.0f, totalSemitones / 12.0f);
 
         return index > 0 ? ratio : -ratio;
+    }
+
+    // Recalcule la vitesse à partir des deux contrôles (thread message)
+    // et la publie pour le thread audio.
+    void updatePlaybackSpeed()
+    {
+        const int index =
+            static_cast<int>(std::round(speedSlider.getValue()));
+
+        const float fineTune =
+            static_cast<float>(fineTuneSlider.getValue());
+
+        playbackSpeed.store(speedFrom(index, fineTune));
     }
 
     // Texte affiché sous le slider pour un index donné.
@@ -502,9 +542,13 @@ private:
 
     juce::Slider speedSlider;
     juce::Label speedLabel;
+
+    juce::Slider fineTuneSlider;
+    juce::Label fineTuneLabel;
+
     std::atomic<float> playbackSpeed { 1.0f };
 
-    static constexpr int semitoneRange = 12; // +/- une octave.
+    static constexpr int semitoneRange = 36; // +/- trois octaves.
 
     int fadeLengthSamples = 0;
     static constexpr double fadeSeconds = 0.005; // ~5 ms.
