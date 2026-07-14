@@ -45,6 +45,7 @@ public:
 private:
     void buildSpeedControls();
     void buildFilterControls();
+    void buildDelayControls();
     void buildMixControls();
 
     void updatePlaybackSpeed();
@@ -65,6 +66,12 @@ private:
     float fadeGainAt(double positionInPortion) const;
 
     void applyFilter(int numberOfSamples);
+
+    // Delay avec réinjection. Le tone est placé DANS la boucle de
+    // réinjection : chaque répétition est filtrée une fois de plus que
+    // la précédente, donc les échos s'assombrissent (ou s'amincissent)
+    // progressivement.
+    void applyDelay(int numberOfSamples);
 
     // Index du slider (+ réglage fin) -> vitesse de lecture.
     // 0 -> arrêt ; sinon |index| donne le demi-ton (magnitude - 37 =>
@@ -94,6 +101,16 @@ private:
     juce::Slider resonanceSlider;
     juce::Label resonanceLabel;
 
+    // Delay.
+    juce::Slider delayTimeSlider;
+    juce::Label delayTimeLabel;
+    juce::Slider feedbackSlider;
+    juce::Label feedbackLabel;
+    juce::Slider toneSlider;
+    juce::Label toneLabel;
+    juce::Slider delayMixSlider;
+    juce::Label delayMixLabel;
+
     // Mix.
     juce::Slider volumeSlider;
     juce::Label volumeLabel;
@@ -108,9 +125,28 @@ private:
     std::atomic<float> playbackGain { 1.0f };
     std::atomic<float> panPosition { 0.0f }; // -1 gauche, +1 droite.
 
+    std::atomic<float> delayTimeMs { 300.0f };
+    std::atomic<float> feedbackAmount { 0.0f };
+    std::atomic<float> toneValue { 0.0f };    // <0 passe-bas, >0 passe-haut.
+    std::atomic<float> delayMix { 0.0f };     // 0 = delay absent.
+
     // État audio (thread audio uniquement).
     juce::dsp::StateVariableTPTFilter<float> filter;
     juce::AudioBuffer<float> renderBuffer; // Scratch mono pré-alloué.
+
+    juce::dsp::DelayLine<
+        float,
+        juce::dsp::DelayLineInterpolationTypes::Linear
+    > delayLine;
+
+    // Filtre de la boucle de réinjection du delay.
+    juce::dsp::StateVariableTPTFilter<float> toneFilter;
+
+    // Le temps de delay est lissé : un changement brutal produirait un
+    // clic. Le lissage donne une glissade de hauteur, comme une bande.
+    juce::SmoothedValue<float> smoothedDelaySamples;
+
+    double currentSampleRate = 44100.0;
 
     // La voix ne lit qu'une portion de l'échantillon partagé, tirée au
     // sort à chaque démarrage de lecture. playbackPosition est RELATIVE
@@ -128,6 +164,9 @@ private:
 
     static constexpr double fadeSeconds = 0.005;      // ~5 ms.
     static constexpr double minPortionFraction = 0.1; // 10 %.
+
+    static constexpr double maxDelaySeconds = 2.0;
+    static constexpr float maxFeedback = 0.95f; // Évite l'emballement.
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LooperComponent)
 };

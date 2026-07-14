@@ -52,7 +52,7 @@ MainComponent::MainComponent()
     // setSize déclenche resized() : il doit venir APRÈS la création des
     // enfants, sinon les loopers n'existent pas encore et restent sans
     // bounds.
-    setSize(1200, 780);
+    setSize(1200, 1010);
 
     // On demande deux canaux d'entrée ; le périphérique n'en fournira
     // peut-être qu'un (micro d'iPad, par exemple). prepareToPlay lit le

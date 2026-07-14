@@ -7,6 +7,7 @@ LooperComponent::LooperComponent(const juce::String& titleToUse)
 {
     buildSpeedControls();
     buildFilterControls();
+    buildDelayControls();
     buildMixControls();
 
     updatePlaybackSpeed();
@@ -139,6 +140,91 @@ void LooperComponent::buildFilterControls()
     resonanceLabel.attachToComponent(&resonanceSlider, false);
 }
 
+void LooperComponent::buildDelayControls()
+{
+    auto configureKnob = [this](juce::Slider& slider, juce::Label& label,
+                                const juce::String& text)
+    {
+        addAndMakeVisible(slider);
+        slider.setSliderStyle(
+            juce::Slider::RotaryHorizontalVerticalDrag
+        );
+        slider.setTextBoxStyle(
+            juce::Slider::TextBoxBelow,
+            false,
+            70,
+            18
+        );
+
+        addAndMakeVisible(label);
+        label.setText(text, juce::dontSendNotification);
+        label.setJustificationType(juce::Justification::centred);
+        label.attachToComponent(&slider, false);
+    };
+
+    configureKnob(delayTimeSlider, delayTimeLabel, "Time");
+    delayTimeSlider.setRange(10.0, maxDelaySeconds * 1000.0);
+    delayTimeSlider.setSkewFactorFromMidPoint(300.0);
+    delayTimeSlider.setTextValueSuffix(" ms");
+    delayTimeSlider.setValue(300.0);
+
+    delayTimeSlider.onValueChange = [this]
+    {
+        delayTimeMs.store(
+            static_cast<float>(delayTimeSlider.getValue())
+        );
+    };
+
+    configureKnob(feedbackSlider, feedbackLabel, "Feedback");
+    feedbackSlider.setRange(0.0, 95.0, 1.0);
+    feedbackSlider.setTextValueSuffix(" %");
+    feedbackSlider.setValue(30.0);
+
+    feedbackSlider.onValueChange = [this]
+    {
+        feedbackAmount.store(
+            static_cast<float>(feedbackSlider.getValue()) * 0.01f
+        );
+    };
+
+    // Tone : passe-bas sur la première moitié, passe-haut sur la
+    // seconde. Le centre est neutre.
+    configureKnob(toneSlider, toneLabel, "Tone");
+    toneSlider.setRange(-1.0, 1.0, 0.01);
+    toneSlider.setValue(0.0);
+    toneSlider.setDoubleClickReturnValue(true, 0.0);
+
+    toneSlider.textFromValueFunction = [](double value)
+    {
+        const int amount = juce::roundToInt(std::abs(value) * 100.0);
+
+        if (amount == 0)
+            return juce::String("Neutre");
+
+        return juce::String(value < 0.0 ? "LP " : "HP ")
+             + juce::String(amount);
+    };
+
+    toneSlider.onValueChange = [this]
+    {
+        toneValue.store(static_cast<float>(toneSlider.getValue()));
+    };
+
+    // Mix à 0 par défaut : le delay est présent mais inaudible tant
+    // qu'on ne l'ouvre pas.
+    configureKnob(delayMixSlider, delayMixLabel, "Mix");
+    delayMixSlider.setRange(0.0, 100.0, 1.0);
+    delayMixSlider.setTextValueSuffix(" %");
+    delayMixSlider.setValue(0.0);
+
+    delayMixSlider.onValueChange = [this]
+    {
+        delayMix.store(
+            static_cast<float>(delayMixSlider.getValue()) * 0.01f
+        );
+    };
+}
+
 void LooperComponent::buildMixControls()
 {
     addAndMakeVisible(volumeSlider);
@@ -263,6 +349,23 @@ void LooperComponent::resized()
     cutoffSlider.setBounds(cutoffArea.reduced(6, 0));
     resonanceSlider.setBounds(filterKnobs.reduced(6, 0));
 
+    // Delay : time + feedback, puis tone + mix.
+    area.removeFromTop(24);
+    auto delayTopRow = area.removeFromTop(90);
+    auto timeArea =
+        delayTopRow.removeFromLeft(delayTopRow.getWidth() / 2);
+
+    delayTimeSlider.setBounds(timeArea.reduced(6, 0));
+    feedbackSlider.setBounds(delayTopRow.reduced(6, 0));
+
+    area.removeFromTop(24);
+    auto delayBottomRow = area.removeFromTop(90);
+    auto toneArea =
+        delayBottomRow.removeFromLeft(delayBottomRow.getWidth() / 2);
+
+    toneSlider.setBounds(toneArea.reduced(6, 0));
+    delayMixSlider.setBounds(delayBottomRow.reduced(6, 0));
+
     // Mix : volume + panoramique.
     area.removeFromTop(24);
     auto mixKnobs = area.removeFromTop(90);
@@ -350,6 +453,26 @@ void LooperComponent::prepare(double sampleRate, int maximumBlockSize)
     filter.prepare(spec);
     filter.reset();
 
+    currentSampleRate = sampleRate;
+
+    delayLine.setMaximumDelayInSamples(
+        static_cast<int>(sampleRate * maxDelaySeconds) + 1
+    );
+
+    delayLine.prepare(spec);
+    delayLine.reset();
+
+    toneFilter.prepare(spec);
+    toneFilter.reset();
+    toneFilter.setResonance(0.707f);
+
+    // Rampe de 50 ms sur le temps de delay : évite le clic quand on
+    // tourne le potard.
+    smoothedDelaySamples.reset(sampleRate, 0.05);
+    smoothedDelaySamples.setCurrentAndTargetValue(
+        static_cast<float>(delayTimeMs.load() * 0.001 * sampleRate)
+    );
+
     // Le cutoff doit rester sous Nyquist.
     maxCutoffHz = juce::jmin(
         20000.0f,
@@ -399,7 +522,12 @@ void LooperComponent::startPlayback(int sampleLength)
     portionStart = random.nextInt(sampleLength - portionLength + 1);
 
     playbackPosition = 0.0;
+
     filter.reset();
+
+    // Purge la queue du delay de la boucle précédente.
+    delayLine.reset();
+    toneFilter.reset();
 }
 
 float LooperComponent::fadeGainAt(double positionInPortion) const
@@ -462,6 +590,7 @@ void LooperComponent::renderNextBlock(
     );
 
     applyFilter(numberOfSamples);
+    applyDelay(numberOfSamples);
 
     // Volume, puis répartition stéréo à puissance constante (-3 dB au
     // centre, donc pas de creux de niveau perçu au milieu).
@@ -545,6 +674,68 @@ void LooperComponent::readSampleIntoRenderBuffer(
 
         while (playbackPosition < 0.0)
             playbackPosition += portionLength;
+    }
+}
+
+void LooperComponent::applyDelay(int numberOfSamples)
+{
+    const float mix = delayMix.load();
+    const float feedback =
+        juce::jlimit(0.0f, maxFeedback, feedbackAmount.load());
+
+    smoothedDelaySamples.setTargetValue(
+        static_cast<float>(
+            delayTimeMs.load() * 0.001f * currentSampleRate
+        )
+    );
+
+    // Tone : passe-bas sur la première moitié du potard, passe-haut sur
+    // la seconde. Au centre (0), le passe-bas est à 20 kHz : neutre.
+    const float tone = toneValue.load();
+
+    if (tone <= 0.0f)
+    {
+        toneFilter.setType(
+            juce::dsp::StateVariableTPTFilterType::lowpass
+        );
+
+        // 20 kHz au centre -> 200 Hz à fond à gauche.
+        const float cutoff = 20000.0f * std::pow(0.01f, -tone);
+
+        toneFilter.setCutoffFrequency(
+            juce::jlimit(20.0f, maxCutoffHz, cutoff)
+        );
+    }
+    else
+    {
+        toneFilter.setType(
+            juce::dsp::StateVariableTPTFilterType::highpass
+        );
+
+        // 20 Hz au centre -> 5 kHz à fond à droite.
+        const float cutoff = 20.0f * std::pow(250.0f, tone);
+
+        toneFilter.setCutoffFrequency(
+            juce::jlimit(20.0f, maxCutoffHz, cutoff)
+        );
+    }
+
+    auto* channelData = renderBuffer.getWritePointer(0);
+
+    for (int i = 0; i < numberOfSamples; ++i)
+    {
+        delayLine.setDelay(smoothedDelaySamples.getNextValue());
+
+        const float dry = channelData[i];
+        const float delayed = delayLine.popSample(0);
+
+        // Le tone est DANS la boucle : chaque répétition est filtrée
+        // une fois de plus que la précédente.
+        const float fedBack = toneFilter.processSample(0, delayed);
+
+        delayLine.pushSample(0, dry + fedBack * feedback);
+
+        channelData[i] = dry + delayed * mix;
     }
 }
 
