@@ -234,35 +234,42 @@ void LooperComponent::paint(juce::Graphics& graphics)
 
 void LooperComponent::resized()
 {
-    auto area = getLocalBounds().reduced(10);
+    // Empilement vertical : le composant est pensé pour vivre dans une
+    // colonne étroite (4 côte à côte). Les espaces laissés avant chaque
+    // contrôle accueillent son label, attaché juste au-dessus.
+    auto area = getLocalBounds().reduced(8);
 
-    area.removeFromTop(24); // Place du titre (dessiné dans paint).
+    area.removeFromTop(26); // Titre (dessiné dans paint).
 
-    // Vitesse : fader cranté + réglage fin.
-    auto speedRow = area.removeFromTop(110);
-    auto fineArea = speedRow.removeFromRight(110);
+    // Vitesse : fader cranté pleine largeur, puis réglage fin.
+    area.removeFromTop(18);
+    speedSlider.setBounds(area.removeFromTop(36));
 
-    fineTuneSlider.setBounds(fineArea.reduced(5, 22));
-    speedSlider.setBounds(speedRow.reduced(10, 22));
+    area.removeFromTop(24);
+    auto fineRow = area.removeFromTop(84);
+    fineTuneSlider.setBounds(fineRow.withSizeKeepingCentre(90, 84));
 
     // Filtre : switch LP/HP, puis cutoff + résonance.
-    auto filterRow = area.removeFromTop(140);
-
+    area.removeFromTop(10);
     filterTypeButton.setBounds(
-        filterRow.removeFromTop(34).reduced(10, 0)
+        area.removeFromTop(32).reduced(20, 0)
     );
 
-    auto cutoffArea = filterRow.removeFromLeft(filterRow.getWidth() / 2);
+    area.removeFromTop(24);
+    auto filterKnobs = area.removeFromTop(90);
+    auto cutoffArea =
+        filterKnobs.removeFromLeft(filterKnobs.getWidth() / 2);
 
-    cutoffSlider.setBounds(cutoffArea.reduced(8, 22));
-    resonanceSlider.setBounds(filterRow.reduced(8, 22));
+    cutoffSlider.setBounds(cutoffArea.reduced(6, 0));
+    resonanceSlider.setBounds(filterKnobs.reduced(6, 0));
 
     // Mix : volume + panoramique.
-    auto mixRow = area.removeFromTop(130);
-    auto volumeArea = mixRow.removeFromLeft(mixRow.getWidth() / 2);
+    area.removeFromTop(24);
+    auto mixKnobs = area.removeFromTop(90);
+    auto volumeArea = mixKnobs.removeFromLeft(mixKnobs.getWidth() / 2);
 
-    volumeSlider.setBounds(volumeArea.reduced(8, 22));
-    panSlider.setBounds(mixRow.reduced(8, 22));
+    volumeSlider.setBounds(volumeArea.reduced(6, 0));
+    panSlider.setBounds(mixKnobs.reduced(6, 0));
 }
 
 //==============================================================================

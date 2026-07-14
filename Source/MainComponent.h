@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_dsp/juce_dsp.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "LooperComponent.h"
@@ -58,12 +59,25 @@ private:
         int numberOfSamples
     );
 
-    // Nombre de voix. Passer à 4 suffit à en créer autant.
-    static constexpr int numberOfLoopers = 1;
+    // Nombre de voix.
+    static constexpr int numberOfLoopers = 4;
 
     juce::OwnedArray<LooperComponent> loopers;
 
     juce::TextButton recordButton { "Enregistrer" };
+
+    // Master : les voix s'additionnent, il faut donc un point de
+    // réglage global. Défaut -12 dB = 1/4, soit l'unité quand les 4
+    // voix jouent le même signal à volume nominal.
+    juce::Slider masterVolumeSlider;
+    juce::Label masterVolumeLabel;
+    std::atomic<float> masterGain { 1.0f };
+
+    // Filet de sécurité : empêche toute saturation numérique si on
+    // remonte les volumes.
+    juce::dsp::Limiter<float> limiter;
+
+    static constexpr double defaultMasterDecibels = -12.0;
 
     // Vu-mètre d'entrée.
     std::atomic<float> inputLevel { 0.0f };

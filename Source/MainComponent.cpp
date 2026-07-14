@@ -14,10 +14,45 @@ MainComponent::MainComponent()
     addAndMakeVisible(recordButton);
     recordButton.onClick = [this] { toggleRecording(); };
 
+    addAndMakeVisible(masterVolumeSlider);
+    masterVolumeSlider.setSliderStyle(
+        juce::Slider::RotaryHorizontalVerticalDrag
+    );
+    masterVolumeSlider.setRange(-60.0, 6.0, 0.1);
+    masterVolumeSlider.setTextValueSuffix(" dB");
+    masterVolumeSlider.setTextBoxStyle(
+        juce::Slider::TextBoxBelow,
+        false,
+        90,
+        18
+    );
+    masterVolumeSlider.setValue(defaultMasterDecibels);
+    masterVolumeSlider.setDoubleClickReturnValue(
+        true,
+        defaultMasterDecibels
+    );
+
+    masterVolumeSlider.onValueChange = [this]
+    {
+        masterGain.store(
+            juce::Decibels::decibelsToGain(
+                static_cast<float>(masterVolumeSlider.getValue()),
+                -60.0f
+            )
+        );
+    };
+
+    addAndMakeVisible(masterVolumeLabel);
+    masterVolumeLabel.setText("Master", juce::dontSendNotification);
+    masterVolumeLabel.setJustificationType(
+        juce::Justification::centred
+    );
+    masterVolumeLabel.attachToComponent(&masterVolumeSlider, false);
+
     // setSize déclenche resized() : il doit venir APRÈS la création des
     // enfants, sinon les loopers n'existent pas encore et restent sans
     // bounds.
-    setSize(900, 720);
+    setSize(1200, 780);
 
     setAudioChannels(1, 2);
 
@@ -144,6 +179,17 @@ void MainComponent::prepareToPlay(
 
     for (auto* looper : loopers)
         looper->prepare(sampleRate, samplesPerBlockExpected);
+
+    juce::dsp::ProcessSpec spec;
+    spec.sampleRate = sampleRate;
+    spec.maximumBlockSize =
+        static_cast<juce::uint32>(samplesPerBlockExpected);
+    spec.numChannels = 2;
+
+    limiter.prepare(spec);
+    limiter.reset();
+    limiter.setThreshold(-1.0f);
+    limiter.setRelease(100.0f);
 }
 
 void MainComponent::getNextAudioBlock(
@@ -190,6 +236,23 @@ void MainComponent::getNextAudioBlock(
                 recordedLength
             );
         }
+
+        buffer->applyGain(
+            startSample,
+            numberOfSamples,
+            masterGain.load()
+        );
+
+        // Filet de sécurité contre la saturation numérique.
+        juce::dsp::AudioBlock<float> block(*buffer);
+
+        auto subBlock = block.getSubBlock(
+            static_cast<size_t>(startSample),
+            static_cast<size_t>(numberOfSamples)
+        );
+
+        juce::dsp::ProcessContextReplacing<float> context(subBlock);
+        limiter.process(context);
     }
     else if (buffer->getNumChannels() >= 2)
     {
@@ -330,7 +393,12 @@ void MainComponent::resized()
         buttonRow.withSizeKeepingCentre(200, 40)
     );
 
-    meterArea = area.removeFromTop(150);
+    auto topRow = area.removeFromTop(150);
+
+    auto masterArea = topRow.removeFromRight(180);
+    masterVolumeSlider.setBounds(masterArea.reduced(35, 30));
+
+    meterArea = topRow;
 
     // Les voix se répartissent la largeur restante, en colonnes.
     const int columnWidth =
