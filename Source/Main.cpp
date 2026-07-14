@@ -1,4 +1,5 @@
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_dsp/juce_dsp.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include <cmath>
@@ -10,7 +11,7 @@ class MainComponent final
 public:
     MainComponent()
     {
-        setSize(800, 500);
+        setSize(800, 780);
 
         addAndMakeVisible(recordButton);
 
@@ -100,6 +101,148 @@ public:
 
         updatePlaybackSpeed();
 
+        // --- Volume et panoramique de la boucle ---
+
+        addAndMakeVisible(volumeSlider);
+        volumeSlider.setSliderStyle(
+            juce::Slider::RotaryHorizontalVerticalDrag
+        );
+        volumeSlider.setRange(-60.0, 6.0, 0.1);
+        volumeSlider.setTextValueSuffix(" dB");
+        volumeSlider.setTextBoxStyle(
+            juce::Slider::TextBoxBelow,
+            false,
+            90,
+            18
+        );
+        volumeSlider.setValue(0.0);
+        volumeSlider.setDoubleClickReturnValue(true, 0.0);
+
+        volumeSlider.onValueChange = [this]
+        {
+            // -60 dB est traité comme silence total.
+            playbackGain.store(
+                juce::Decibels::decibelsToGain(
+                    static_cast<float>(volumeSlider.getValue()),
+                    -60.0f
+                )
+            );
+        };
+
+        addAndMakeVisible(volumeLabel);
+        volumeLabel.setText("Volume", juce::dontSendNotification);
+        volumeLabel.setJustificationType(juce::Justification::centred);
+        volumeLabel.attachToComponent(&volumeSlider, false);
+
+        addAndMakeVisible(panSlider);
+        panSlider.setSliderStyle(
+            juce::Slider::RotaryHorizontalVerticalDrag
+        );
+        panSlider.setRange(-1.0, 1.0, 0.01);
+        panSlider.setTextBoxStyle(
+            juce::Slider::TextBoxBelow,
+            false,
+            90,
+            18
+        );
+        panSlider.setValue(0.0);
+        panSlider.setDoubleClickReturnValue(true, 0.0);
+
+        panSlider.textFromValueFunction = [](double value)
+        {
+            const int amount =
+                juce::roundToInt(std::abs(value) * 100.0);
+
+            if (amount == 0)
+                return juce::String("C");
+
+            return juce::String(value < 0.0 ? "G " : "D ")
+                 + juce::String(amount);
+        };
+
+        panSlider.onValueChange = [this]
+        {
+            panPosition.store(
+                static_cast<float>(panSlider.getValue())
+            );
+        };
+
+        addAndMakeVisible(panLabel);
+        panLabel.setText("Pan", juce::dontSendNotification);
+        panLabel.setJustificationType(juce::Justification::centred);
+        panLabel.attachToComponent(&panSlider, false);
+
+        // --- Section filtre ---
+
+        addAndMakeVisible(filterTypeButton);
+        filterTypeButton.setClickingTogglesState(true);
+
+        filterTypeButton.onClick = [this]
+        {
+            const bool highPass = filterTypeButton.getToggleState();
+
+            highPassMode.store(highPass);
+
+            filterTypeButton.setButtonText(
+                highPass ? "Passe-haut" : "Passe-bas"
+            );
+        };
+
+        addAndMakeVisible(cutoffSlider);
+        cutoffSlider.setSliderStyle(
+            juce::Slider::RotaryHorizontalVerticalDrag
+        );
+        cutoffSlider.setRange(20.0, 20000.0);
+        cutoffSlider.setSkewFactorFromMidPoint(1000.0);
+        cutoffSlider.setTextValueSuffix(" Hz");
+        cutoffSlider.setTextBoxStyle(
+            juce::Slider::TextBoxBelow,
+            false,
+            90,
+            18
+        );
+        cutoffSlider.setValue(20000.0);
+
+        cutoffSlider.onValueChange = [this]
+        {
+            cutoffHz.store(
+                static_cast<float>(cutoffSlider.getValue())
+            );
+        };
+
+        addAndMakeVisible(cutoffLabel);
+        cutoffLabel.setText("Cutoff", juce::dontSendNotification);
+        cutoffLabel.setJustificationType(juce::Justification::centred);
+        cutoffLabel.attachToComponent(&cutoffSlider, false);
+
+        addAndMakeVisible(resonanceSlider);
+        resonanceSlider.setSliderStyle(
+            juce::Slider::RotaryHorizontalVerticalDrag
+        );
+        resonanceSlider.setRange(0.5, 10.0);
+        resonanceSlider.setSkewFactorFromMidPoint(2.0);
+        resonanceSlider.setTextBoxStyle(
+            juce::Slider::TextBoxBelow,
+            false,
+            90,
+            18
+        );
+        resonanceSlider.setValue(0.707);
+
+        resonanceSlider.onValueChange = [this]
+        {
+            resonanceValue.store(
+                static_cast<float>(resonanceSlider.getValue())
+            );
+        };
+
+        addAndMakeVisible(resonanceLabel);
+        resonanceLabel.setText("Resonance", juce::dontSendNotification);
+        resonanceLabel.setJustificationType(
+            juce::Justification::centred
+        );
+        resonanceLabel.attachToComponent(&resonanceSlider, false);
+
         addAndMakeVisible(speedLabel);
         speedLabel.setText("Vitesse", juce::dontSendNotification);
         speedLabel.setJustificationType(juce::Justification::centred);
@@ -121,7 +264,20 @@ public:
         double sampleRate
     ) override
     {
-        juce::ignoreUnused(samplesPerBlockExpected);
+        juce::dsp::ProcessSpec spec;
+        spec.sampleRate = sampleRate;
+        spec.maximumBlockSize =
+            static_cast<juce::uint32>(samplesPerBlockExpected);
+        spec.numChannels = 1;
+
+        filter.prepare(spec);
+        filter.reset();
+
+        // Le cutoff doit rester sous Nyquist.
+        maxCutoffHz = juce::jmin(
+            20000.0f,
+            static_cast<float>(sampleRate) * 0.49f
+        );
 
         historyBufferSize = static_cast<int>(
             sampleRate * historyDurationSeconds
@@ -210,8 +366,24 @@ public:
             );
         }
 
-        if (buffer->getNumChannels() >= 2)
+        applyFilter(
+            *buffer,
+            startSample,
+            numberOfSamples
+        );
+
+        if (isPlaying.load())
         {
+            // Volume + pan : seulement sur la lecture de l'échantillon.
+            applyGainAndPan(
+                *buffer,
+                startSample,
+                numberOfSamples
+            );
+        }
+        else if (buffer->getNumChannels() >= 2)
+        {
+            // Monitoring d'entrée : dual-mono à l'unité.
             buffer->copyFrom(
                 1,
                 startSample,
@@ -236,7 +408,7 @@ public:
         );
 
         auto bounds = getLocalBounds();
-        bounds.removeFromBottom(200); // Espace réservé contrôles.
+        bounds.removeFromBottom(480); // Espace réservé contrôles.
         bounds = bounds.reduced(40);
 
         graphics.setColour(juce::Colours::white);
@@ -271,22 +443,50 @@ public:
     {
         auto area = getLocalBounds();
 
-        auto bottomStrip = area.removeFromBottom(200);
-
-        auto buttonRow = bottomStrip.removeFromBottom(70);
+        auto buttonRow = area.removeFromBottom(70);
 
         recordButton.setBounds(
             buttonRow.withSizeKeepingCentre(200, 40)
         );
 
-        auto knobColumn = bottomStrip.removeFromRight(130);
+        // Rangée mix : volume + panoramique de la boucle.
+        auto mixRow = area.removeFromBottom(140);
+
+        auto mixArea =
+            mixRow.withSizeKeepingCentre(360, mixRow.getHeight());
+
+        volumeSlider.setBounds(
+            mixArea.removeFromLeft(180).reduced(20, 25)
+        );
+
+        panSlider.setBounds(mixArea.reduced(20, 25));
+
+        // Rangée filtre : switch LP/HP + cutoff + résonance.
+        auto filterRow = area.removeFromBottom(140);
+
+        auto switchArea = filterRow.removeFromLeft(180);
+
+        filterTypeButton.setBounds(
+            switchArea.withSizeKeepingCentre(140, 40)
+        );
+
+        auto cutoffArea =
+            filterRow.removeFromLeft(filterRow.getWidth() / 2);
+
+        cutoffSlider.setBounds(cutoffArea.reduced(20, 25));
+        resonanceSlider.setBounds(filterRow.reduced(20, 25));
+
+        // Rangée vitesse : fader cranté + réglage fin.
+        auto speedRow = area.removeFromBottom(130);
+
+        auto knobColumn = speedRow.removeFromRight(130);
 
         fineTuneSlider.setBounds(
             knobColumn.reduced(15, 25)
         );
 
         speedSlider.setBounds(
-            bottomStrip.reduced(40, 25)
+            speedRow.reduced(40, 25)
         );
     }
 
@@ -420,6 +620,88 @@ private:
         return text;
     }
 
+    // Applique le volume puis répartit le mono du canal 0 en stéréo
+    // selon le panoramique (loi à puissance constante : -3 dB au
+    // centre, donc pas de creux de niveau perçu au milieu).
+    void applyGainAndPan(
+        juce::AudioBuffer<float>& buffer,
+        int startSample,
+        int numberOfSamples
+    )
+    {
+        const float gain = playbackGain.load();
+        const float pan = panPosition.load(); // -1..+1
+
+        // pan -1..+1 -> angle 0..pi/2
+        const float angle =
+            (pan + 1.0f) * 0.25f
+            * juce::MathConstants<float>::pi;
+
+        const float leftGain = std::cos(angle) * gain;
+        const float rightGain = std::sin(angle) * gain;
+
+        auto* left = buffer.getWritePointer(0, startSample);
+
+        if (buffer.getNumChannels() < 2)
+        {
+            juce::FloatVectorOperations::multiply(
+                left,
+                leftGain,
+                numberOfSamples
+            );
+
+            return;
+        }
+
+        auto* right = buffer.getWritePointer(1, startSample);
+
+        for (int i = 0; i < numberOfSamples; ++i)
+        {
+            const float sample = left[i];
+
+            left[i] = sample * leftGain;
+            right[i] = sample * rightGain;
+        }
+    }
+
+    void applyFilter(
+        juce::AudioBuffer<float>& buffer,
+        int startSample,
+        int numberOfSamples
+    )
+    {
+        // Paramètres publiés par l'UI : relus une fois par bloc.
+        filter.setType(
+            highPassMode.load()
+                ? juce::dsp::StateVariableTPTFilterType::highpass
+                : juce::dsp::StateVariableTPTFilterType::lowpass
+        );
+
+        filter.setCutoffFrequency(
+            juce::jlimit(20.0f, maxCutoffHz, cutoffHz.load())
+        );
+
+        filter.setResonance(resonanceValue.load());
+
+        auto* channelData = buffer.getWritePointer(0, startSample);
+
+        for (int i = 0; i < numberOfSamples; ++i)
+            channelData[i] = filter.processSample(0, channelData[i]);
+    }
+
+    // Replie un index dans [0, length) : la boucle est continue, donc
+    // les voisins débordant d'un bout reviennent par l'autre.
+    static int wrapIndex(int index, int length)
+    {
+        while (index < 0)
+            index += length;
+
+        while (index >= length)
+            index -= length;
+
+        return index;
+    }
+
     void applyLoopFade()
     {
         if (recordedLength <= 0)
@@ -473,18 +755,29 @@ private:
         {
             // playbackPosition reste dans [0, recordedLength) : la
             // troncature équivaut au plancher.
-            const int index0 = static_cast<int>(playbackPosition);
+            const int index = static_cast<int>(playbackPosition);
             const float fraction =
-                static_cast<float>(playbackPosition - index0);
+                static_cast<float>(playbackPosition - index);
 
-            int index1 = index0 + 1;
-            if (index1 >= recordedLength)
-                index1 = 0; // Interpolation continue au raccord.
+            // Les 4 points encadrant la position (-1, 0, +1, +2).
+            const float y0 =
+                source[wrapIndex(index - 1, recordedLength)];
+            const float y1 = source[index];
+            const float y2 =
+                source[wrapIndex(index + 1, recordedLength)];
+            const float y3 =
+                source[wrapIndex(index + 2, recordedLength)];
 
-            // Interpolation linéaire pour les vitesses fractionnaires.
+            // Interpolation Hermite 4 points, 3e ordre (Catmull-Rom).
+            const float c0 = y1;
+            const float c1 = 0.5f * (y2 - y0);
+            const float c2 =
+                y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+            const float c3 =
+                0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+
             destination[i] =
-                source[index0] * (1.0f - fraction)
-                + source[index1] * fraction;
+                ((c3 * fraction + c2) * fraction + c1) * fraction + c0;
 
             playbackPosition += speed;
 
@@ -552,6 +845,29 @@ private:
 
     int fadeLengthSamples = 0;
     static constexpr double fadeSeconds = 0.005; // ~5 ms.
+
+    juce::Slider volumeSlider;
+    juce::Label volumeLabel;
+    juce::Slider panSlider;
+    juce::Label panLabel;
+
+    std::atomic<float> playbackGain { 1.0f };
+    std::atomic<float> panPosition { 0.0f }; // -1 = gauche, +1 = droite.
+
+    juce::dsp::StateVariableTPTFilter<float> filter;
+
+    juce::TextButton filterTypeButton { "Passe-bas" };
+    juce::Slider cutoffSlider;
+    juce::Label cutoffLabel;
+    juce::Slider resonanceSlider;
+    juce::Label resonanceLabel;
+
+    std::atomic<bool> highPassMode { false };
+    std::atomic<float> cutoffHz { 20000.0f };
+    std::atomic<float> resonanceValue { 0.707f };
+
+    // Borne haute du cutoff, ajustée au sample rate (< Nyquist).
+    float maxCutoffHz = 20000.0f;
 };
 
 class DroneLooperApplication final : public juce::JUCEApplication

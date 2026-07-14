@@ -30,6 +30,7 @@ target_compile_definitions(DroneLooper
 target_link_libraries(DroneLooper
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_dsp
         juce::juce_gui_extra
 
     PUBLIC
