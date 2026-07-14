@@ -356,6 +356,8 @@ void LooperComponent::prepare(double sampleRate, int maximumBlockSize)
         static_cast<float>(sampleRate) * 0.49f
     );
 
+    fadeLengthSamples = static_cast<int>(sampleRate * fadeSeconds);
+
     // Scratch mono : cette voix y construit son signal avant de
     // l'additionner dans la sortie partagée.
     renderBuffer.setSize(1, maximumBlockSize, false, true, false);
@@ -364,10 +366,64 @@ void LooperComponent::prepare(double sampleRate, int maximumBlockSize)
     playbackPosition = 0.0;
 }
 
-void LooperComponent::resetPlayback()
+void LooperComponent::startPlayback(int sampleLength)
 {
+    if (sampleLength <= 0)
+    {
+        portionStart = 0;
+        portionLength = 0;
+
+        return;
+    }
+
+    // Longueur minimale : de quoi loger le fondu d'entrée/sortie, et de
+    // quoi alimenter l'interpolation Hermite (4 points).
+    const int minPortionSamples =
+        juce::jmax(64, fadeLengthSamples * 2);
+
+    // On utilise le RNG système plutôt qu'un juce::Random par voix :
+    // quatre instances construites dans la même milliseconde
+    // pourraient être semées identiquement et tirer les MÊMES portions.
+    auto& random = juce::Random::getSystemRandom();
+
+    const double fraction =
+        minPortionFraction
+        + (1.0 - minPortionFraction) * random.nextDouble();
+
+    portionLength = juce::jlimit(
+        juce::jmin(minPortionSamples, sampleLength),
+        sampleLength,
+        juce::roundToInt(sampleLength * fraction)
+    );
+
+    portionStart = random.nextInt(sampleLength - portionLength + 1);
+
     playbackPosition = 0.0;
     filter.reset();
+}
+
+float LooperComponent::fadeGainAt(double positionInPortion) const
+{
+    const int fade = juce::jmin(fadeLengthSamples, portionLength / 2);
+
+    if (fade <= 0)
+        return 1.0f;
+
+    if (positionInPortion < fade)
+    {
+        return static_cast<float>(positionInPortion)
+             / static_cast<float>(fade);
+    }
+
+    const double distanceToEnd = portionLength - positionInPortion;
+
+    if (distanceToEnd < fade)
+    {
+        return static_cast<float>(distanceToEnd)
+             / static_cast<float>(fade);
+    }
+
+    return 1.0f;
 }
 
 void LooperComponent::renderNextBlock(
@@ -380,6 +436,14 @@ void LooperComponent::renderNextBlock(
 {
     if (sampleData == nullptr || sampleLength <= 0)
         return;
+
+    // La portion doit être valide et tenir dans l'échantillon.
+    if (portionLength <= 0
+        || portionStart < 0
+        || portionStart + portionLength > sampleLength)
+    {
+        return;
+    }
 
     // Le scratch est pré-alloué : on ne dépasse jamais sa taille.
     if (numberOfSamples > renderBuffer.getNumSamples())
@@ -394,7 +458,6 @@ void LooperComponent::renderNextBlock(
     readSampleIntoRenderBuffer(
         numberOfSamples,
         sampleData,
-        sampleLength,
         speed
     );
 
@@ -437,7 +500,6 @@ void LooperComponent::renderNextBlock(
 void LooperComponent::readSampleIntoRenderBuffer(
     int numberOfSamples,
     const float* sampleData,
-    int sampleLength,
     float speed
 )
 {
@@ -445,17 +507,22 @@ void LooperComponent::readSampleIntoRenderBuffer(
 
     for (int i = 0; i < numberOfSamples; ++i)
     {
-        // playbackPosition reste dans [0, sampleLength) : la troncature
-        // équivaut au plancher.
+        // playbackPosition est RELATIVE à la portion et reste dans
+        // [0, portionLength) : la troncature équivaut au plancher.
         const int index = static_cast<int>(playbackPosition);
         const float fraction =
             static_cast<float>(playbackPosition - index);
 
-        // Les 4 points encadrant la position (-1, 0, +1, +2).
-        const float y0 = sampleData[wrapIndex(index - 1, sampleLength)];
-        const float y1 = sampleData[index];
-        const float y2 = sampleData[wrapIndex(index + 1, sampleLength)];
-        const float y3 = sampleData[wrapIndex(index + 2, sampleLength)];
+        // Les 4 points encadrant la position (-1, 0, +1, +2). Ils se
+        // replient DANS la portion : c'est elle, la boucle.
+        const float y0 =
+            sampleData[portionStart + wrapIndex(index - 1, portionLength)];
+        const float y1 =
+            sampleData[portionStart + index];
+        const float y2 =
+            sampleData[portionStart + wrapIndex(index + 1, portionLength)];
+        const float y3 =
+            sampleData[portionStart + wrapIndex(index + 2, portionLength)];
 
         // Interpolation Hermite 4 points, 3e ordre (Catmull-Rom).
         const float c0 = y1;
@@ -463,17 +530,21 @@ void LooperComponent::readSampleIntoRenderBuffer(
         const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
         const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
 
-        destination[i] =
+        const float interpolated =
             ((c3 * fraction + c2) * fraction + c1) * fraction + c0;
+
+        // Enveloppe anti-clic : la portion démarre et finit à zéro.
+        destination[i] =
+            interpolated * fadeGainAt(playbackPosition);
 
         playbackPosition += speed;
 
         // Bouclage dans les deux sens (vitesse négative comprise).
-        while (playbackPosition >= sampleLength)
-            playbackPosition -= sampleLength;
+        while (playbackPosition >= portionLength)
+            playbackPosition -= portionLength;
 
         while (playbackPosition < 0.0)
-            playbackPosition += sampleLength;
+            playbackPosition += portionLength;
     }
 }
 

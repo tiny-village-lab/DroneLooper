@@ -42,10 +42,6 @@ private:
     // Bascule enregistrement -> lecture -> nouvel enregistrement.
     void toggleRecording();
 
-    // Fondu d'entrée/sortie sur l'échantillon : la boucle démarre et
-    // finit à zéro, ce qui supprime le clic au raccord.
-    void applyLoopFade();
-
     // --- Thread audio ---
     void writeInputToHistory(
         const juce::AudioBuffer<float>& sourceBuffer,
@@ -101,9 +97,6 @@ private:
 
     std::atomic<bool> isRecording { false };
     std::atomic<bool> isPlaying { false };
-
-    int fadeLengthSamples = 0;
-    static constexpr double fadeSeconds = 0.005; // ~5 ms.
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

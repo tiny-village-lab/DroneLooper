@@ -79,12 +79,11 @@ void MainComponent::toggleRecording()
 
         recordedLength = recordingWritePosition;
 
-        applyLoopFade();
-
         // Le thread audio n'appelle pas les loopers tant que isPlaying
-        // est faux : on peut les réinitialiser ici sans risque.
+        // est faux : on peut les réinitialiser ici sans risque. Chaque
+        // voix tire au sort la portion qu'elle va boucler.
         for (auto* looper : loopers)
-            looper->resetPlayback();
+            looper->startPlayback(recordedLength);
 
         // isPlaying est publié en dernier : le thread audio ne lira
         // recordedLength ni l'état des voix qu'après ce store.
@@ -105,28 +104,6 @@ void MainComponent::toggleRecording()
 
         recordButton.setButtonText("Arreter");
     }
-}
-
-void MainComponent::applyLoopFade()
-{
-    if (recordedLength <= 0)
-        return;
-
-    // Fondu au plus égal à la moitié de l'échantillon.
-    const int fade = juce::jmin(fadeLengthSamples, recordedLength / 2);
-
-    if (fade <= 0)
-        return;
-
-    recordingBuffer.applyGainRamp(0, 0, fade, 0.0f, 1.0f);
-
-    recordingBuffer.applyGainRamp(
-        0,
-        recordedLength - fade,
-        fade,
-        1.0f,
-        0.0f
-    );
 }
 
 //==============================================================================
@@ -157,8 +134,6 @@ void MainComponent::prepareToPlay(
     recordingCapacity = static_cast<int>(
         sampleRate * maxRecordingSeconds
     );
-
-    fadeLengthSamples = static_cast<int>(sampleRate * fadeSeconds);
 
     recordingBuffer.setSize(
         1,
