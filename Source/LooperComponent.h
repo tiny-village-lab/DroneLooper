@@ -71,7 +71,14 @@ private:
     // réinjection : chaque répétition est filtrée une fois de plus que
     // la précédente, donc les échos s'assombrissent (ou s'amincissent)
     // progressivement.
+    // Contient aussi la saturation, appliquée au SEUL signal retardé,
+    // après la ligne à retard et hors de la boucle de réinjection.
     void applyDelay(int numberOfSamples);
+
+    // Courbe de transfert de la saturation. coldness morphe entre une
+    // courbe douce (chaud, harmoniques paires via l'asymétrie) et un
+    // écrêtage dur (froid, harmoniques impaires).
+    static float shape(float x, float coldness);
 
     // Index du slider (+ réglage fin) -> vitesse de lecture.
     // 0 -> arrêt ; sinon |index| donne le demi-ton (magnitude - 37 =>
@@ -167,6 +174,21 @@ private:
 
     static constexpr double maxDelaySeconds = 2.0;
     static constexpr float maxFeedback = 0.95f; // Évite l'emballement.
+
+    // --- Réglage de la couleur de la saturation (à ajuster à l'oreille) ---
+
+    // Gain d'attaque au maximum de saturation. Plus haut = plus sale.
+    static constexpr float maxSaturationDrive = 4.0f;
+
+    // Part de saturation restante quand le feedback est à zéro. C'est
+    // ce qui rend la distorsion discrète à faible feedback. À 0, un
+    // feedback nul donne un delay parfaitement propre.
+    static constexpr float saturationFeedbackFloor = 0.15f;
+
+    // Asymétrie du côté chaud. C'est elle qui crée les harmoniques
+    // paires. Plus haut = plus « lampe », mais aussi plus de DC à
+    // compenser. 0 = saturation purement symétrique.
+    static constexpr float warmBias = 0.3f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LooperComponent)
 };

@@ -720,6 +720,34 @@ void LooperComponent::applyDelay(int numberOfSamples)
         );
     }
 
+    // --- Saturation du signal retardé ---
+    //
+    // Le feedback pilote son intensité : à feedback bas elle reste très
+    // discrète. Le mix la conditionne (delay fermé = rien à saturer).
+    const float amount =
+        mix * (saturationFeedbackFloor
+               + (1.0f - saturationFeedbackFloor) * feedback);
+
+    const float drive =
+        1.0f + amount * (maxSaturationDrive - 1.0f);
+
+    // Couleur pilotée par le tone :
+    //   tone < 0 (passe-bas)  -> chaud : asymétrique et doux
+    //   tone > 0 (passe-haut) -> froid : symétrique et dur
+    const float warmth = juce::jmax(0.0f, -tone);
+    const float coldness = juce::jmax(0.0f, tone);
+
+    const float bias = warmBias * warmth * amount;
+
+    // L'asymétrie décale le signal : sans cette soustraction, une
+    // composante continue se propagerait jusqu'au master.
+    const float dcOffset = shape(bias, coldness);
+
+    // À faible niveau la courbe est quasi linéaire (pente = drive) :
+    // diviser par le drive garde le volume constant et ne laisse que la
+    // compression des crêtes et les harmoniques ajoutées.
+    const float makeup = 1.0f / drive;
+
     auto* channelData = renderBuffer.getWritePointer(0);
 
     for (int i = 0; i < numberOfSamples; ++i)
@@ -729,14 +757,38 @@ void LooperComponent::applyDelay(int numberOfSamples)
         const float dry = channelData[i];
         const float delayed = delayLine.popSample(0);
 
-        // Le tone est DANS la boucle : chaque répétition est filtrée
-        // une fois de plus que la précédente.
+        // Réinjection : le tone est DANS la boucle (chaque répétition
+        // est filtrée une fois de plus), mais PAS la saturation, qui
+        // se cumulerait à chaque tour.
         const float fedBack = toneFilter.processSample(0, delayed);
 
         delayLine.pushSample(0, dry + fedBack * feedback);
 
-        channelData[i] = dry + delayed * mix;
+        // Saturation appliquée au seul signal retardé. Le fondu par
+        // amount garantit qu'à saturation nulle le delay reste
+        // parfaitement propre (la courbe n'est pas l'identité à
+        // drive = 1).
+        const float driven = delayed * drive + bias;
+
+        const float saturated =
+            (shape(driven, coldness) - dcOffset) * makeup;
+
+        const float wet =
+            delayed + amount * (saturated - delayed);
+
+        channelData[i] = dry + wet * mix;
     }
+}
+
+float LooperComponent::shape(float x, float coldness)
+{
+    // Chaud : courbe douce, saturation progressive.
+    const float soft = std::tanh(x);
+
+    // Froid : écrêtage franc, plus cassant.
+    const float hard = juce::jlimit(-1.0f, 1.0f, x);
+
+    return soft + coldness * (hard - soft);
 }
 
 void LooperComponent::applyFilter(int numberOfSamples)
