@@ -1,0 +1,356 @@
+#include "MainComponent.h"
+
+MainComponent::MainComponent()
+{
+    for (int i = 0; i < numberOfLoopers; ++i)
+    {
+        auto* looper = loopers.add(
+            new LooperComponent("Looper " + juce::String(i + 1))
+        );
+
+        addAndMakeVisible(looper);
+    }
+
+    addAndMakeVisible(recordButton);
+    recordButton.onClick = [this] { toggleRecording(); };
+
+    // setSize déclenche resized() : il doit venir APRÈS la création des
+    // enfants, sinon les loopers n'existent pas encore et restent sans
+    // bounds.
+    setSize(900, 720);
+
+    setAudioChannels(1, 2);
+
+    // Rafraîchit l'interface environ 30 fois par seconde.
+    startTimerHz(30);
+}
+
+MainComponent::~MainComponent()
+{
+    shutdownAudio();
+}
+
+//==============================================================================
+// Enregistrement / lecture (thread message)
+//==============================================================================
+
+void MainComponent::toggleRecording()
+{
+    if (isRecording.load())
+    {
+        // Enregistrement -> on arrête et on lance la lecture en boucle
+        // de ce qui vient d'être capturé.
+        isRecording.store(false);
+
+        recordedLength = recordingWritePosition;
+
+        applyLoopFade();
+
+        // Le thread audio n'appelle pas les loopers tant que isPlaying
+        // est faux : on peut les réinitialiser ici sans risque.
+        for (auto* looper : loopers)
+            looper->resetPlayback();
+
+        // isPlaying est publié en dernier : le thread audio ne lira
+        // recordedLength ni l'état des voix qu'après ce store.
+        isPlaying.store(true);
+
+        recordButton.setButtonText("Enregistrer");
+    }
+    else
+    {
+        // Arrêté ou en lecture -> on démarre un nouvel enregistrement
+        // (par-dessus le précédent).
+        isPlaying.store(false);
+
+        // On repart de zéro AVANT d'activer, pendant que le thread
+        // audio ignore encore le buffer.
+        recordingWritePosition = 0;
+        isRecording.store(true);
+
+        recordButton.setButtonText("Arreter");
+    }
+}
+
+void MainComponent::applyLoopFade()
+{
+    if (recordedLength <= 0)
+        return;
+
+    // Fondu au plus égal à la moitié de l'échantillon.
+    const int fade = juce::jmin(fadeLengthSamples, recordedLength / 2);
+
+    if (fade <= 0)
+        return;
+
+    recordingBuffer.applyGainRamp(0, 0, fade, 0.0f, 1.0f);
+
+    recordingBuffer.applyGainRamp(
+        0,
+        recordedLength - fade,
+        fade,
+        1.0f,
+        0.0f
+    );
+}
+
+//==============================================================================
+// Audio
+//==============================================================================
+
+void MainComponent::prepareToPlay(
+    int samplesPerBlockExpected,
+    double sampleRate
+)
+{
+    historyBufferSize = static_cast<int>(
+        sampleRate * historyDurationSeconds
+    );
+
+    inputHistoryBuffer.setSize(
+        1,
+        historyBufferSize,
+        false,
+        true,
+        false
+    );
+
+    inputHistoryBuffer.clear();
+
+    historyWritePosition = 0;
+
+    recordingCapacity = static_cast<int>(
+        sampleRate * maxRecordingSeconds
+    );
+
+    fadeLengthSamples = static_cast<int>(sampleRate * fadeSeconds);
+
+    recordingBuffer.setSize(
+        1,
+        recordingCapacity,
+        false,
+        true,
+        false
+    );
+
+    recordingBuffer.clear();
+
+    recordingWritePosition = 0;
+
+    // Un changement de périphérique/sample rate réinitialise la boucle
+    // en cours.
+    isPlaying.store(false);
+    recordedLength = 0;
+
+    for (auto* looper : loopers)
+        looper->prepare(sampleRate, samplesPerBlockExpected);
+}
+
+void MainComponent::getNextAudioBlock(
+    const juce::AudioSourceChannelInfo& bufferToFill
+)
+{
+    auto* buffer = bufferToFill.buffer;
+
+    if (buffer == nullptr)
+        return;
+
+    const int startSample = bufferToFill.startSample;
+    const int numberOfSamples = bufferToFill.numSamples;
+
+    // L'entrée est encore dans le buffer : on la consomme d'abord.
+    const float rms = buffer->getRMSLevel(
+        0,
+        startSample,
+        numberOfSamples
+    );
+
+    inputLevel.store(rms);
+
+    writeInputToHistory(*buffer, startSample, numberOfSamples);
+
+    if (isRecording.load())
+        appendToRecording(*buffer, startSample, numberOfSamples);
+
+    if (isPlaying.load())
+    {
+        // La sortie est la SOMME des voix : on part du silence, puis
+        // chaque looper ajoute sa contribution.
+        buffer->clear(startSample, numberOfSamples);
+
+        const float* sampleData = recordingBuffer.getReadPointer(0);
+
+        for (auto* looper : loopers)
+        {
+            looper->renderNextBlock(
+                *buffer,
+                startSample,
+                numberOfSamples,
+                sampleData,
+                recordedLength
+            );
+        }
+    }
+    else if (buffer->getNumChannels() >= 2)
+    {
+        // Monitoring d'entrée : dual-mono à l'unité, non traité.
+        buffer->copyFrom(
+            1,
+            startSample,
+            *buffer,
+            0,
+            startSample,
+            numberOfSamples
+        );
+    }
+}
+
+void MainComponent::releaseResources()
+{
+}
+
+void MainComponent::writeInputToHistory(
+    const juce::AudioBuffer<float>& sourceBuffer,
+    int sourceStartSample,
+    int numberOfSamples
+)
+{
+    if (historyBufferSize <= 0)
+        return;
+
+    const int samplesUntilEnd =
+        historyBufferSize - historyWritePosition;
+
+    const int firstCopySize =
+        juce::jmin(numberOfSamples, samplesUntilEnd);
+
+    inputHistoryBuffer.copyFrom(
+        0,
+        historyWritePosition,
+        sourceBuffer,
+        0,
+        sourceStartSample,
+        firstCopySize
+    );
+
+    const int remainingSamples = numberOfSamples - firstCopySize;
+
+    if (remainingSamples > 0)
+    {
+        inputHistoryBuffer.copyFrom(
+            0,
+            0,
+            sourceBuffer,
+            0,
+            sourceStartSample + firstCopySize,
+            remainingSamples
+        );
+    }
+
+    historyWritePosition =
+        (historyWritePosition + numberOfSamples) % historyBufferSize;
+}
+
+void MainComponent::appendToRecording(
+    const juce::AudioBuffer<float>& sourceBuffer,
+    int sourceStartSample,
+    int numberOfSamples
+)
+{
+    if (recordingCapacity <= 0)
+        return;
+
+    const int spaceLeft = recordingCapacity - recordingWritePosition;
+    const int samplesToCopy = juce::jmin(numberOfSamples, spaceLeft);
+
+    if (samplesToCopy <= 0)
+        return; // Buffer plein : on ignore (pas d'allocation).
+
+    recordingBuffer.copyFrom(
+        0,
+        recordingWritePosition,
+        sourceBuffer,
+        0,
+        sourceStartSample,
+        samplesToCopy
+    );
+
+    recordingWritePosition += samplesToCopy;
+}
+
+//==============================================================================
+// Interface
+//==============================================================================
+
+void MainComponent::paint(juce::Graphics& graphics)
+{
+    graphics.fillAll(
+        getLookAndFeel().findColour(
+            juce::ResizableWindow::backgroundColourId
+        )
+    );
+
+    auto bounds = meterArea.reduced(20);
+
+    graphics.setColour(juce::Colours::white);
+    graphics.setFont(juce::FontOptions(22.0f));
+
+    graphics.drawText(
+        "Niveau d'entree",
+        bounds.removeFromTop(30),
+        juce::Justification::centred
+    );
+
+    auto meterBounds = bounds
+        .withSizeKeepingCentre(60, bounds.getHeight())
+        .toFloat();
+
+    graphics.setColour(juce::Colours::darkgrey);
+    graphics.fillRoundedRectangle(meterBounds, 8.0f);
+
+    const float level = displayedLevel;
+
+    auto activeBounds = meterBounds;
+
+    activeBounds.removeFromTop(
+        activeBounds.getHeight() * (1.0f - level)
+    );
+
+    graphics.setColour(juce::Colours::limegreen);
+    graphics.fillRoundedRectangle(activeBounds, 8.0f);
+}
+
+void MainComponent::resized()
+{
+    auto area = getLocalBounds();
+
+    auto buttonRow = area.removeFromBottom(70);
+
+    recordButton.setBounds(
+        buttonRow.withSizeKeepingCentre(200, 40)
+    );
+
+    meterArea = area.removeFromTop(150);
+
+    // Les voix se répartissent la largeur restante, en colonnes.
+    const int columnWidth =
+        area.getWidth() / juce::jmax(1, loopers.size());
+
+    for (auto* looper : loopers)
+        looper->setBounds(area.removeFromLeft(columnWidth));
+}
+
+void MainComponent::timerCallback()
+{
+    const float newLevel = inputLevel.load();
+
+    // Monte rapidement, redescend plus doucement.
+    if (newLevel > displayedLevel)
+        displayedLevel = newLevel;
+    else
+        displayedLevel *= 0.90f;
+
+    displayedLevel = juce::jlimit(0.0f, 1.0f, displayedLevel);
+
+    repaint(meterArea);
+}

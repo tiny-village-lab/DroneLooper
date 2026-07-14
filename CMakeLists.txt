@@ -16,6 +16,8 @@ juce_add_gui_app(DroneLooper
 target_sources(DroneLooper
     PRIVATE
         Source/Main.cpp
+        Source/MainComponent.cpp
+        Source/LooperComponent.cpp
 )
 
 target_compile_definitions(DroneLooper
