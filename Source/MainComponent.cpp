@@ -14,6 +14,79 @@ MainComponent::MainComponent()
     addAndMakeVisible(recordButton);
     recordButton.onClick = [this] { toggleRecording(); };
 
+    // --- Presets A/B/C/D ---
+
+    addAndMakeVisible(storeButton);
+    storeButton.setClickingTogglesState(true);
+    storeButton.setColour(
+        juce::TextButton::buttonOnColourId,
+        juce::Colours::orangered
+    );
+
+    storeButton.onClick = [this] { refreshPresetButtons(); };
+
+    for (int i = 0; i < numberOfPresets; ++i)
+    {
+        auto* button = presetButtons.add(
+            new juce::TextButton(
+                juce::String::charToString(
+                    static_cast<juce::juce_wchar>('A' + i)
+                )
+            )
+        );
+
+        addAndMakeVisible(button);
+
+        button->onClick = [this, i]
+        {
+            if (storeButton.getToggleState())
+            {
+                storePreset(i);
+
+                // Le mode mémorisation se désarme après usage.
+                storeButton.setToggleState(
+                    false,
+                    juce::dontSendNotification
+                );
+            }
+            else
+            {
+                recallPreset(i);
+            }
+
+            refreshPresetButtons();
+        };
+    }
+
+    refreshPresetButtons();
+
+    addAndMakeVisible(transitionTimeSlider);
+    transitionTimeSlider.setSliderStyle(
+        juce::Slider::LinearHorizontal
+    );
+    transitionTimeSlider.setRange(0.0, 30.0, 0.1);
+    transitionTimeSlider.setTextValueSuffix(" s");
+    transitionTimeSlider.setValue(0.0);
+    transitionTimeSlider.setTextBoxStyle(
+        juce::Slider::TextBoxRight,
+        false,
+        70,
+        20
+    );
+
+    addAndMakeVisible(transitionTimeLabel);
+    transitionTimeLabel.setText(
+        "Transition",
+        juce::dontSendNotification
+    );
+    transitionTimeLabel.setJustificationType(
+        juce::Justification::centred
+    );
+    transitionTimeLabel.attachToComponent(
+        &transitionTimeSlider,
+        false
+    );
+
     addAndMakeVisible(masterVolumeSlider);
     masterVolumeSlider.setSliderStyle(
         juce::Slider::RotaryHorizontalVerticalDrag
@@ -111,7 +184,7 @@ MainComponent::MainComponent()
     // setSize déclenche resized() : il doit venir APRÈS la création des
     // enfants, sinon les loopers n'existent pas encore et restent sans
     // bounds.
-    setSize(1200, 1010);
+    setSize(1200, 1100);
 
     // On demande deux canaux d'entrée ; le périphérique n'en fournira
     // peut-être qu'un (micro d'iPad, par exemple). prepareToPlay lit le
@@ -165,6 +238,152 @@ void MainComponent::toggleRecording()
         isRecording.store(true);
 
         recordButton.setButtonText("Arreter");
+    }
+}
+
+//==============================================================================
+// Presets
+//==============================================================================
+
+void MainComponent::storePreset(int index)
+{
+    auto& preset = presets[static_cast<size_t>(index)];
+
+    preset.loopers.clear();
+
+    for (auto* looper : loopers)
+        preset.loopers.push_back(looper->captureState());
+
+    preset.hasContent = true;
+}
+
+void MainComponent::recallPreset(int index)
+{
+    const auto& preset = presets[static_cast<size_t>(index)];
+
+    // Un emplacement jamais mémorisé n'a rien à rappeler.
+    if (! preset.hasContent)
+        return;
+
+    if (preset.loopers.size() != static_cast<size_t>(loopers.size()))
+        return;
+
+    const double duration = transitionTimeSlider.getValue();
+
+    if (duration <= 0.0)
+    {
+        // Transition instantanée.
+        morphing = false;
+
+        for (int i = 0; i < loopers.size(); ++i)
+        {
+            loopers[i]->applyState(
+                preset.loopers[static_cast<size_t>(i)]
+            );
+        }
+
+        return;
+    }
+
+    // On part de l'état affiché à l'instant du clic : une transition
+    // interrompue par une autre repart donc du bon endroit.
+    morphFrom.clear();
+
+    for (auto* looper : loopers)
+        morphFrom.push_back(looper->captureState());
+
+    morphTo = preset.loopers;
+
+    morphDurationSeconds = duration;
+    morphProgress = 0.0;
+    morphUiCounter = 0;
+    morphing = true;
+}
+
+void MainComponent::advanceMorph()
+{
+    if (! morphing)
+        return;
+
+    // Le timer bat à 30 Hz.
+    morphProgress += (1.0 / 30.0) / morphDurationSeconds;
+
+    const bool finished = morphProgress >= 1.0;
+
+    if (finished)
+        morphProgress = 1.0;
+
+    for (int i = 0; i < loopers.size(); ++i)
+    {
+        const auto index = static_cast<size_t>(i);
+
+        if (index >= morphFrom.size() || index >= morphTo.size())
+            break;
+
+        loopers[i]->applyMorphedState(
+            morphFrom[index],
+            morphTo[index],
+            morphProgress
+        );
+    }
+
+    ++morphUiCounter;
+
+    if (finished || (morphUiCounter % morphUiInterval) == 0)
+    {
+        for (int i = 0; i < loopers.size(); ++i)
+        {
+            const auto index = static_cast<size_t>(i);
+
+            if (index >= morphFrom.size() || index >= morphTo.size())
+                break;
+
+            loopers[i]->updateControlsForMorph(
+                morphFrom[index],
+                morphTo[index],
+                morphProgress
+            );
+        }
+    }
+
+    if (! finished)
+        return;
+
+    // Arrivé à destination : on recale exactement sur la cible, ce qui
+    // remet notamment le fader de vitesse sur son cran.
+    for (int i = 0; i < loopers.size(); ++i)
+    {
+        const auto index = static_cast<size_t>(i);
+
+        if (index >= morphTo.size())
+            break;
+
+        loopers[i]->applyState(morphTo[index]);
+    }
+
+    morphing = false;
+}
+
+void MainComponent::refreshPresetButtons()
+{
+    const bool storing = storeButton.getToggleState();
+
+    for (int i = 0; i < presetButtons.size(); ++i)
+    {
+        auto* button = presetButtons[i];
+
+        const bool filled =
+            presets[static_cast<size_t>(i)].hasContent;
+
+        // Emplacement vide : grisé, sauf en mode mémorisation où il
+        // devient une cible valide.
+        button->setEnabled(storing || filled);
+
+        button->setColour(
+            juce::TextButton::buttonColourId,
+            filled ? juce::Colours::steelblue
+                   : juce::Colours::darkgrey
+        );
     }
 }
 
@@ -579,6 +798,28 @@ void MainComponent::resized()
 
     auto buttonRow = area.removeFromBottom(70);
 
+    // Rangée presets : A/B/C/D, mémorisation, temps de transition.
+    auto presetRow = area.removeFromBottom(90);
+    presetRow.removeFromTop(24); // Place du label du slider.
+
+    auto presetArea = presetRow.removeFromLeft(560).reduced(20, 8);
+
+    storeButton.setBounds(presetArea.removeFromLeft(140).reduced(6, 0));
+
+    const int presetWidth =
+        presetArea.getWidth() / juce::jmax(1, presetButtons.size());
+
+    for (auto* button : presetButtons)
+    {
+        button->setBounds(
+            presetArea.removeFromLeft(presetWidth).reduced(6, 0)
+        );
+    }
+
+    transitionTimeSlider.setBounds(
+        presetRow.removeFromLeft(430).reduced(20, 10)
+    );
+
     recordButton.setBounds(
         buttonRow.withSizeKeepingCentre(200, 40)
     );
@@ -629,6 +870,8 @@ void MainComponent::timerCallback()
 
     displayedCpuUsage =
         static_cast<float>(deviceManager.getCpuUsage());
+
+    advanceMorph();
 
     repaint(meterArea);
 }

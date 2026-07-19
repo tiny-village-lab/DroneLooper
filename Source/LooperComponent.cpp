@@ -473,6 +473,260 @@ int LooperComponent::wrapIndex(int index, int length)
 }
 
 //==============================================================================
+// Presets
+//==============================================================================
+
+LooperState LooperComponent::captureState() const
+{
+    LooperState state;
+
+    state.speedIndex =
+        static_cast<int>(std::round(speedSlider.getValue()));
+    state.fineTune = fineTuneSlider.getValue();
+
+    state.highPass = filterTypeButton.getToggleState();
+    state.cutoffHz = cutoffSlider.getValue();
+    state.resonance = resonanceSlider.getValue();
+
+    state.delayTimeMs = delayTimeSlider.getValue();
+    state.feedbackPercent = feedbackSlider.getValue();
+    state.tone = toneSlider.getValue();
+    state.delayMixPercent = delayMixSlider.getValue();
+
+    state.volumeDecibels = volumeSlider.getValue();
+    state.pan = panSlider.getValue();
+    state.reverbSendPercent = reverbSendSlider.getValue();
+
+    return state;
+}
+
+void LooperComponent::applyState(const LooperState& state)
+{
+    // dontSendNotification : c'est le moteur de presets qui publie les
+    // valeurs, pas les callbacks des sliders. Sinon on créerait une
+    // boucle de réaction entre l'affichage et les paramètres.
+    speedSlider.setValue(
+        state.speedIndex,
+        juce::dontSendNotification
+    );
+
+    fineTuneSlider.setValue(
+        state.fineTune,
+        juce::dontSendNotification
+    );
+
+    filterTypeButton.setToggleState(
+        state.highPass,
+        juce::dontSendNotification
+    );
+
+    filterTypeButton.setButtonText(
+        state.highPass ? "Passe-haut" : "Passe-bas"
+    );
+
+    cutoffSlider.setValue(state.cutoffHz, juce::dontSendNotification);
+
+    resonanceSlider.setValue(
+        state.resonance,
+        juce::dontSendNotification
+    );
+
+    delayTimeSlider.setValue(
+        state.delayTimeMs,
+        juce::dontSendNotification
+    );
+
+    feedbackSlider.setValue(
+        state.feedbackPercent,
+        juce::dontSendNotification
+    );
+
+    toneSlider.setValue(state.tone, juce::dontSendNotification);
+
+    delayMixSlider.setValue(
+        state.delayMixPercent,
+        juce::dontSendNotification
+    );
+
+    volumeSlider.setValue(
+        state.volumeDecibels,
+        juce::dontSendNotification
+    );
+
+    panSlider.setValue(state.pan, juce::dontSendNotification);
+
+    reverbSendSlider.setValue(
+        state.reverbSendPercent,
+        juce::dontSendNotification
+    );
+
+    // Publication vers le thread audio.
+    updatePlaybackSpeed();
+
+    highPassMode.store(state.highPass);
+    cutoffHz.store(static_cast<float>(state.cutoffHz));
+    resonanceValue.store(static_cast<float>(state.resonance));
+
+    delayTimeMs.store(static_cast<float>(state.delayTimeMs));
+    feedbackAmount.store(
+        static_cast<float>(state.feedbackPercent) * 0.01f
+    );
+    toneValue.store(static_cast<float>(state.tone));
+    delayMix.store(
+        static_cast<float>(state.delayMixPercent) * 0.01f
+    );
+
+    playbackGain.store(
+        juce::Decibels::decibelsToGain(
+            static_cast<float>(state.volumeDecibels),
+            -60.0f
+        )
+    );
+
+    panPosition.store(static_cast<float>(state.pan));
+    reverbSend.store(
+        static_cast<float>(state.reverbSendPercent) * 0.01f
+    );
+}
+
+void LooperComponent::applyMorphedState(
+    const LooperState& from,
+    const LooperState& to,
+    double progress
+)
+{
+    const double t = juce::jlimit(0.0, 1.0, progress);
+
+    auto lerp = [t](double a, double b)
+    {
+        return a + t * (b - a);
+    };
+
+    // Vitesse : glissando continu dans l'espace des VITESSES. On
+    // interpole le ratio de lecture lui-même, pas le nombre de
+    // demi-tons — d'où la sensation d'accélération / décélération.
+    const float speedA = speedFrom(
+        from.speedIndex,
+        static_cast<float>(from.fineTune)
+    );
+
+    const float speedB = speedFrom(
+        to.speedIndex,
+        static_cast<float>(to.fineTune)
+    );
+
+    playbackSpeed.store(
+        static_cast<float>(lerp(speedA, speedB))
+    );
+
+    // Le type de filtre ne s'interpole pas : il bascule à la fin.
+    highPassMode.store(t >= 1.0 ? to.highPass : from.highPass);
+
+    cutoffHz.store(
+        static_cast<float>(lerp(from.cutoffHz, to.cutoffHz))
+    );
+
+    resonanceValue.store(
+        static_cast<float>(lerp(from.resonance, to.resonance))
+    );
+
+    delayTimeMs.store(
+        static_cast<float>(lerp(from.delayTimeMs, to.delayTimeMs))
+    );
+
+    feedbackAmount.store(
+        static_cast<float>(
+            lerp(from.feedbackPercent, to.feedbackPercent)
+        ) * 0.01f
+    );
+
+    toneValue.store(
+        static_cast<float>(lerp(from.tone, to.tone))
+    );
+
+    delayMix.store(
+        static_cast<float>(
+            lerp(from.delayMixPercent, to.delayMixPercent)
+        ) * 0.01f
+    );
+
+    playbackGain.store(
+        juce::Decibels::decibelsToGain(
+            static_cast<float>(
+                lerp(from.volumeDecibels, to.volumeDecibels)
+            ),
+            -60.0f
+        )
+    );
+
+    panPosition.store(
+        static_cast<float>(lerp(from.pan, to.pan))
+    );
+
+    reverbSend.store(
+        static_cast<float>(
+            lerp(from.reverbSendPercent, to.reverbSendPercent)
+        ) * 0.01f
+    );
+}
+
+void LooperComponent::updateControlsForMorph(
+    const LooperState& from,
+    const LooperState& to,
+    double progress
+)
+{
+    const double t = juce::jlimit(0.0, 1.0, progress);
+
+    auto lerp = [t](double a, double b)
+    {
+        return a + t * (b - a);
+    };
+
+    auto show = [](juce::Slider& slider, double value)
+    {
+        slider.setValue(value, juce::dontSendNotification);
+    };
+
+    // Le fader de vitesse est cranté : il ne peut pas afficher la
+    // valeur continue du glissando. Il suit donc le cran le plus
+    // proche, à titre indicatif.
+    show(
+        speedSlider,
+        std::round(lerp(from.speedIndex, to.speedIndex))
+    );
+
+    show(fineTuneSlider, lerp(from.fineTune, to.fineTune));
+    show(cutoffSlider, lerp(from.cutoffHz, to.cutoffHz));
+    show(resonanceSlider, lerp(from.resonance, to.resonance));
+    show(delayTimeSlider, lerp(from.delayTimeMs, to.delayTimeMs));
+
+    show(
+        feedbackSlider,
+        lerp(from.feedbackPercent, to.feedbackPercent)
+    );
+
+    show(toneSlider, lerp(from.tone, to.tone));
+
+    show(
+        delayMixSlider,
+        lerp(from.delayMixPercent, to.delayMixPercent)
+    );
+
+    show(
+        volumeSlider,
+        lerp(from.volumeDecibels, to.volumeDecibels)
+    );
+
+    show(panSlider, lerp(from.pan, to.pan));
+
+    show(
+        reverbSendSlider,
+        lerp(from.reverbSendPercent, to.reverbSendPercent)
+    );
+}
+
+//==============================================================================
 // Audio
 //==============================================================================
 

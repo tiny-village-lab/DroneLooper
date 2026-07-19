@@ -7,6 +7,9 @@
 #include "LooperComponent.h"
 #include "SpringReverb.h"
 
+#include <array>
+#include <vector>
+
 // Détient ce qui est PARTAGÉ entre toutes les voix :
 //  - l'échantillon enregistré (un seul, lu par tous les loopers),
 //  - l'état enregistrement / lecture,
@@ -42,6 +45,48 @@ private:
 
     // Bascule enregistrement -> lecture -> nouvel enregistrement.
     void toggleRecording();
+
+    // --- Presets ---
+
+    // Un emplacement A/B/C/D : les réglages des quatre voix. La réverbe
+    // et le master en sont volontairement exclus.
+    struct Preset
+    {
+        std::vector<LooperState> loopers;
+        bool hasContent = false;
+    };
+
+    void storePreset(int index);
+    void recallPreset(int index);
+    void advanceMorph();
+    void refreshPresetButtons();
+
+    static constexpr int numberOfPresets = 4;
+
+    std::array<Preset, numberOfPresets> presets;
+    juce::OwnedArray<juce::TextButton> presetButtons;
+
+    // Quand il est armé, cliquer sur A/B/C/D enregistre au lieu de
+    // rappeler.
+    juce::TextButton storeButton { "Memoriser" };
+
+    juce::Slider transitionTimeSlider;
+    juce::Label transitionTimeLabel;
+
+    // Transition en cours. Le morphing est piloté depuis le thread
+    // message : il ne fait que publier des valeurs dans les atomiques
+    // déjà lues par le thread audio, donc rien à synchroniser de plus.
+    bool morphing = false;
+    double morphProgress = 0.0;
+    double morphDurationSeconds = 0.0;
+    int morphUiCounter = 0;
+
+    std::vector<LooperState> morphFrom;
+    std::vector<LooperState> morphTo;
+
+    // Rafraîchir 48 sliders à chaque tick serait inutilement lourd :
+    // l'affichage suit trois fois moins vite que les paramètres.
+    static constexpr int morphUiInterval = 3;
 
     // --- Thread audio ---
 

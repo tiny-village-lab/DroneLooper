@@ -4,6 +4,28 @@
 #include <juce_dsp/juce_dsp.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
+// Tous les réglages d'une voix, dans les unités de ses sliders (pour
+// que les réappliquer soit direct). Sert à mémoriser un preset et à
+// interpoler entre deux presets.
+struct LooperState
+{
+    int speedIndex = 37; // semitoneRange + 1 -> 0 demi-ton.
+    double fineTune = 0.0;
+
+    bool highPass = false;
+    double cutoffHz = 20000.0;
+    double resonance = 0.707;
+
+    double delayTimeMs = 300.0;
+    double feedbackPercent = 30.0;
+    double tone = 0.0;
+    double delayMixPercent = 0.0;
+
+    double volumeDecibels = 0.0;
+    double pan = 0.0;
+    double reverbSendPercent = 0.0;
+};
+
 // Une voix de lecture indépendante.
 //
 // Toutes les instances lisent le MÊME échantillon (enregistré et
@@ -18,6 +40,36 @@ public:
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
+
+    // --- Presets (thread message) ---
+
+    // Lit les réglages courants depuis les contrôles.
+    LooperState captureState() const;
+
+    // Applique un état exactement : contrôles et paramètres audio.
+    void applyState(const LooperState& state);
+
+    // Applique un état intermédiaire, à mi-chemin entre deux presets.
+    // progress va de 0 (source) à 1 (cible).
+    //
+    // Deux paramètres échappent à l'interpolation :
+    //  - la vitesse glisse continûment dans l'espace des VITESSES (pas
+    //    des demi-tons), donc hors des crans : d'où la sensation
+    //    d'accélération / décélération,
+    //  - le type de filtre bascule à la toute fin.
+    void applyMorphedState(
+        const LooperState& from,
+        const LooperState& to,
+        double progress
+    );
+
+    // Recale les contrôles sur un état intermédiaire. Séparé du calcul
+    // audio pour pouvoir rafraîchir l'écran moins souvent.
+    void updateControlsForMorph(
+        const LooperState& from,
+        const LooperState& to,
+        double progress
+    );
 
     // --- Thread message ---
 
