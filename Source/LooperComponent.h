@@ -21,6 +21,10 @@ struct LooperState
     double tone = 0.0;
     double delayMixPercent = 0.0;
 
+    double tremoloRateHz = 4.0;
+    double tremoloDepthPercent = 0.0;
+    double tremoloShape = 0.0; // 0 = sinus, 1 = dent de scie inversée.
+
     double volumeDecibels = 0.0;
     double pan = 0.0;
     double reverbSendPercent = 0.0;
@@ -102,6 +106,7 @@ private:
     void buildSpeedControls();
     void buildFilterControls();
     void buildDelayControls();
+    void buildTremoloControls();
     void buildMixControls();
 
     void updatePlaybackSpeed();
@@ -130,6 +135,19 @@ private:
     // Contient aussi la saturation, appliquée au SEUL signal retardé,
     // après la ligne à retard et hors de la boucle de réinjection.
     void applyDelay(int numberOfSamples);
+
+    // Tremolo : module le volume VERS LE BAS uniquement (le gain reste
+    // dans [1 - profondeur, 1], jamais au-dessus de l'unité). Placé
+    // AVANT le delay : le delay capture donc le signal déjà haché et
+    // en répète le motif rythmique, au lieu de subir la modulation.
+    void applyTremolo(int numberOfSamples);
+
+    // Forme d'onde du tremolo, à phase donnée (dans [0, 1)).
+    // Les deux formes valent 1 en début de cycle, ce qui permet de les
+    // fondre l'une dans l'autre sans rupture :
+    //   morph = 0 -> sinus, décroissance douce,
+    //   morph = 1 -> dent de scie inversée, attaque franche.
+    static float tremoloShapeAt(double phase, float morph);
 
     // Écrêteur doux placé DANS la boucle de réinjection. Ce n'est pas
     // une couleur : il est strictement linéaire en dessous du seuil, et
@@ -180,6 +198,14 @@ private:
     juce::Slider delayMixSlider;
     juce::Label delayMixLabel;
 
+    // Tremolo.
+    juce::Slider tremoloRateSlider;
+    juce::Label tremoloRateLabel;
+    juce::Slider tremoloDepthSlider;
+    juce::Label tremoloDepthLabel;
+    juce::Slider tremoloShapeSlider;
+    juce::Label tremoloShapeLabel;
+
     // Mix.
     juce::Slider volumeSlider;
     juce::Label volumeLabel;
@@ -202,6 +228,10 @@ private:
     std::atomic<float> toneValue { 0.0f };    // <0 passe-bas, >0 passe-haut.
     std::atomic<float> delayMix { 0.0f };     // 0 = delay absent.
 
+    std::atomic<float> tremoloRateHz { 4.0f };
+    std::atomic<float> tremoloDepth { 0.0f }; // 0 = tremolo absent.
+    std::atomic<float> tremoloShapeMorph { 0.0f };
+
     // État audio (thread audio uniquement).
     juce::dsp::StateVariableTPTFilter<float> filter;
     juce::AudioBuffer<float> renderBuffer; // Scratch mono pré-alloué.
@@ -219,6 +249,19 @@ private:
     juce::SmoothedValue<float> smoothedDelaySamples;
 
     double currentSampleRate = 44100.0;
+
+    // Phase du tremolo, dans [0, 1). Avance d'un incrément par
+    // échantillon.
+    double tremoloPhase = 0.0;
+
+    // Le rebouclage de la dent de scie est une discontinuité de gain :
+    // sans lissage elle produirait un clic, pas une attaque. Un lissage
+    // très court (~1,5 ms) supprime le clic tout en restant perçu comme
+    // franc.
+    float tremoloSmoothedGain = 1.0f;
+    float tremoloSmoothingCoefficient = 1.0f;
+
+    static constexpr double tremoloSmoothingSeconds = 0.0015;
 
     // La voix ne lit qu'une portion de l'échantillon partagé, tirée au
     // sort à chaque démarrage de lecture. playbackPosition est RELATIVE

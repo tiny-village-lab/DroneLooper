@@ -184,7 +184,7 @@ MainComponent::MainComponent()
     // setSize déclenche resized() : il doit venir APRÈS la création des
     // enfants, sinon les loopers n'existent pas encore et restent sans
     // bounds.
-    setSize(1200, 1100);
+    setSize(1200, 1094);
 
     // On demande deux canaux d'entrée ; le périphérique n'en fournira
     // peut-être qu'un (micro d'iPad, par exemple). prepareToPlay lit le
@@ -509,11 +509,6 @@ void MainComponent::getNextAudioBlock(
     // la réduisant à un canal.
     buildMonoInput(*buffer, startSample, numberOfSamples);
 
-    const float rms =
-        monoInputBuffer.getRMSLevel(0, 0, numberOfSamples);
-
-    inputLevel.store(rms);
-
     writeInputToHistory(monoInputBuffer, 0, numberOfSamples);
 
     if (isRecording.load())
@@ -746,107 +741,69 @@ void MainComponent::paint(juce::Graphics& graphics)
         )
     );
 
-    auto bounds = meterArea.reduced(20);
-
-    graphics.setColour(juce::Colours::white);
-    graphics.setFont(juce::FontOptions(22.0f));
-
-    graphics.drawText(
-        "Niveau d'entree",
-        bounds.removeFromTop(30),
-        juce::Justification::centred
-    );
-
-    // Charge CPU : part du budget de callback audio consommée.
-    const float cpuPercent = displayedCpuUsage * 100.0f;
-
-    graphics.setColour(
-        cpuPercent > 70.0f ? juce::Colours::orangered
-                           : juce::Colours::lightgrey
-    );
-
-    graphics.setFont(juce::FontOptions(15.0f));
-
-    graphics.drawText(
-        "CPU audio : " + juce::String(cpuPercent, 1) + " %",
-        bounds.removeFromBottom(24),
-        juce::Justification::centred
-    );
-
-    auto meterBounds = bounds
-        .withSizeKeepingCentre(60, bounds.getHeight())
-        .toFloat();
-
-    graphics.setColour(juce::Colours::darkgrey);
-    graphics.fillRoundedRectangle(meterBounds, 8.0f);
-
-    const float level = displayedLevel;
-
-    auto activeBounds = meterBounds;
-
-    activeBounds.removeFromTop(
-        activeBounds.getHeight() * (1.0f - level)
-    );
-
-    graphics.setColour(juce::Colours::limegreen);
-    graphics.fillRoundedRectangle(activeBounds, 8.0f);
 }
 
 void MainComponent::resized()
 {
     auto area = getLocalBounds();
 
-    auto buttonRow = area.removeFromBottom(70);
+    // Tous les contrôles globaux vivent en bas : les voix récupèrent
+    // ainsi toute la hauteur restante, ce qui permet au fader de
+    // vitesse de garder la pleine largeur de sa colonne.
+    auto bottomArea = area.removeFromBottom(190);
 
-    // Rangée presets : A/B/C/D, mémorisation, temps de transition.
-    auto presetRow = area.removeFromBottom(90);
-    presetRow.removeFromTop(24); // Place du label du slider.
+    // À droite : master, réverbe et son solo.
+    auto globalArea = bottomArea.removeFromRight(580);
 
-    auto presetArea = presetRow.removeFromLeft(560).reduced(20, 8);
+    auto soloArea = globalArea.removeFromRight(140);
 
-    storeButton.setBounds(presetArea.removeFromLeft(140).reduced(6, 0));
+    reverbSoloButton.setBounds(
+        soloArea.withSizeKeepingCentre(120, 40)
+    );
+
+    globalArea.removeFromTop(22); // Place des labels.
+
+    const int globalKnobWidth = globalArea.getWidth() / 3;
+
+    masterVolumeSlider.setBounds(
+        globalArea.removeFromLeft(globalKnobWidth).reduced(18, 22)
+    );
+
+    reverbToneSlider.setBounds(
+        globalArea.removeFromLeft(globalKnobWidth).reduced(18, 22)
+    );
+
+    reverbTimeSlider.setBounds(globalArea.reduced(18, 22));
+
+    // À gauche : enregistrement, presets et temps de transition.
+    auto recordRow = bottomArea.removeFromBottom(60);
+
+    recordButton.setBounds(
+        recordRow.withSizeKeepingCentre(200, 40)
+    );
+
+    auto presetButtonsRow = bottomArea.removeFromTop(46).reduced(20, 3);
+
+    storeButton.setBounds(
+        presetButtonsRow.removeFromLeft(130).reduced(5, 0)
+    );
 
     const int presetWidth =
-        presetArea.getWidth() / juce::jmax(1, presetButtons.size());
+        presetButtonsRow.getWidth()
+        / juce::jmax(1, presetButtons.size());
 
     for (auto* button : presetButtons)
     {
         button->setBounds(
-            presetArea.removeFromLeft(presetWidth).reduced(6, 0)
+            presetButtonsRow.removeFromLeft(presetWidth).reduced(5, 0)
         );
     }
 
+    bottomArea.removeFromTop(20); // Place du label du slider.
+
     transitionTimeSlider.setBounds(
-        presetRow.removeFromLeft(430).reduced(20, 10)
+        bottomArea.removeFromTop(38).reduced(20, 0)
     );
-
-    recordButton.setBounds(
-        buttonRow.withSizeKeepingCentre(200, 40)
-    );
-
-    auto topRow = area.removeFromTop(150);
-
-    // À droite : master + les deux réglages de réverbe.
-    auto knobStrip = topRow.removeFromRight(510);
-    const int topKnobWidth = knobStrip.getWidth() / 3;
-
-    masterVolumeSlider.setBounds(
-        knobStrip.removeFromLeft(topKnobWidth).reduced(25, 28)
-    );
-
-    reverbToneSlider.setBounds(
-        knobStrip.removeFromLeft(topKnobWidth).reduced(25, 28)
-    );
-
-    reverbTimeSlider.setBounds(knobStrip.reduced(25, 28));
-
-    auto soloArea = topRow.removeFromRight(130);
-
-    reverbSoloButton.setBounds(
-        soloArea.withSizeKeepingCentre(110, 36)
-    );
-
-    meterArea = topRow;
 
     // Les voix se répartissent la largeur restante, en colonnes.
     const int columnWidth =
@@ -858,20 +815,7 @@ void MainComponent::resized()
 
 void MainComponent::timerCallback()
 {
-    const float newLevel = inputLevel.load();
-
-    // Monte rapidement, redescend plus doucement.
-    if (newLevel > displayedLevel)
-        displayedLevel = newLevel;
-    else
-        displayedLevel *= 0.90f;
-
-    displayedLevel = juce::jlimit(0.0f, 1.0f, displayedLevel);
-
-    displayedCpuUsage =
-        static_cast<float>(deviceManager.getCpuUsage());
-
+    // Le timer ne sert plus qu'à faire avancer les transitions de
+    // presets.
     advanceMorph();
-
-    repaint(meterArea);
 }

@@ -8,6 +8,7 @@ LooperComponent::LooperComponent(const juce::String& titleToUse)
     buildSpeedControls();
     buildFilterControls();
     buildDelayControls();
+    buildTremoloControls();
     buildMixControls();
 
     updatePlaybackSpeed();
@@ -225,6 +226,80 @@ void LooperComponent::buildDelayControls()
     };
 }
 
+void LooperComponent::buildTremoloControls()
+{
+    auto configureKnob = [this](juce::Slider& slider, juce::Label& label,
+                                const juce::String& text)
+    {
+        addAndMakeVisible(slider);
+        slider.setSliderStyle(
+            juce::Slider::RotaryHorizontalVerticalDrag
+        );
+        slider.setTextBoxStyle(
+            juce::Slider::TextBoxBelow,
+            false,
+            70,
+            18
+        );
+
+        addAndMakeVisible(label);
+        label.setText(text, juce::dontSendNotification);
+        label.setJustificationType(juce::Justification::centred);
+        label.attachToComponent(&slider, false);
+    };
+
+    configureKnob(tremoloRateSlider, tremoloRateLabel, "Trem Rate");
+    tremoloRateSlider.setRange(0.05, 20.0);
+    tremoloRateSlider.setSkewFactorFromMidPoint(2.0);
+    tremoloRateSlider.setTextValueSuffix(" Hz");
+    tremoloRateSlider.setValue(4.0);
+
+    tremoloRateSlider.onValueChange = [this]
+    {
+        tremoloRateHz.store(
+            static_cast<float>(tremoloRateSlider.getValue())
+        );
+    };
+
+    // Profondeur à 0 : le tremolo est câblé mais inaudible tant qu'on
+    // ne l'ouvre pas.
+    configureKnob(tremoloDepthSlider, tremoloDepthLabel, "Trem Depth");
+    tremoloDepthSlider.setRange(0.0, 100.0, 1.0);
+    tremoloDepthSlider.setTextValueSuffix(" %");
+    tremoloDepthSlider.setValue(0.0);
+
+    tremoloDepthSlider.onValueChange = [this]
+    {
+        tremoloDepth.store(
+            static_cast<float>(tremoloDepthSlider.getValue()) * 0.01f
+        );
+    };
+
+    // Fondu continu entre les deux formes d'onde.
+    configureKnob(tremoloShapeSlider, tremoloShapeLabel, "Trem Shape");
+    tremoloShapeSlider.setRange(0.0, 100.0, 1.0);
+    tremoloShapeSlider.setValue(0.0);
+
+    tremoloShapeSlider.textFromValueFunction = [](double value)
+    {
+        if (value <= 0.0)
+            return juce::String("Sinus");
+
+        if (value >= 100.0)
+            return juce::String("Dent");
+
+        return juce::String("Sin/Dent ")
+             + juce::String(juce::roundToInt(value));
+    };
+
+    tremoloShapeSlider.onValueChange = [this]
+    {
+        tremoloShapeMorph.store(
+            static_cast<float>(tremoloShapeSlider.getValue()) * 0.01f
+        );
+    };
+}
+
 void LooperComponent::buildMixControls()
 {
     addAndMakeVisible(volumeSlider);
@@ -354,7 +429,10 @@ void LooperComponent::resized()
 
     area.removeFromTop(26); // Titre (dessiné dans paint).
 
-    // Vitesse : fader cranté pleine largeur, puis réglage fin.
+    // Vitesse : le fader cranté prend TOUTE la largeur de la colonne.
+    // Il compte 151 crans, donc chaque pixel gagné compte pour viser un
+    // demi-ton précis — d'où le réglage fin placé en dessous plutôt
+    // qu'à côté.
     area.removeFromTop(18);
     speedSlider.setBounds(area.removeFromTop(36));
 
@@ -392,6 +470,21 @@ void LooperComponent::resized()
 
     toneSlider.setBounds(toneArea.reduced(6, 0));
     delayMixSlider.setBounds(delayBottomRow.reduced(6, 0));
+
+    // Tremolo : rate + depth + shape.
+    area.removeFromTop(24);
+    auto tremoloKnobs = area.removeFromTop(90);
+    const int tremoloKnobWidth = tremoloKnobs.getWidth() / 3;
+
+    tremoloRateSlider.setBounds(
+        tremoloKnobs.removeFromLeft(tremoloKnobWidth).reduced(3, 0)
+    );
+
+    tremoloDepthSlider.setBounds(
+        tremoloKnobs.removeFromLeft(tremoloKnobWidth).reduced(3, 0)
+    );
+
+    tremoloShapeSlider.setBounds(tremoloKnobs.reduced(3, 0));
 
     // Mix : volume + panoramique + send réverbe.
     area.removeFromTop(24);
@@ -493,6 +586,10 @@ LooperState LooperComponent::captureState() const
     state.tone = toneSlider.getValue();
     state.delayMixPercent = delayMixSlider.getValue();
 
+    state.tremoloRateHz = tremoloRateSlider.getValue();
+    state.tremoloDepthPercent = tremoloDepthSlider.getValue();
+    state.tremoloShape = tremoloShapeSlider.getValue();
+
     state.volumeDecibels = volumeSlider.getValue();
     state.pan = panSlider.getValue();
     state.reverbSendPercent = reverbSendSlider.getValue();
@@ -548,6 +645,21 @@ void LooperComponent::applyState(const LooperState& state)
         juce::dontSendNotification
     );
 
+    tremoloRateSlider.setValue(
+        state.tremoloRateHz,
+        juce::dontSendNotification
+    );
+
+    tremoloDepthSlider.setValue(
+        state.tremoloDepthPercent,
+        juce::dontSendNotification
+    );
+
+    tremoloShapeSlider.setValue(
+        state.tremoloShape,
+        juce::dontSendNotification
+    );
+
     volumeSlider.setValue(
         state.volumeDecibels,
         juce::dontSendNotification
@@ -574,6 +686,14 @@ void LooperComponent::applyState(const LooperState& state)
     toneValue.store(static_cast<float>(state.tone));
     delayMix.store(
         static_cast<float>(state.delayMixPercent) * 0.01f
+    );
+
+    tremoloRateHz.store(static_cast<float>(state.tremoloRateHz));
+    tremoloDepth.store(
+        static_cast<float>(state.tremoloDepthPercent) * 0.01f
+    );
+    tremoloShapeMorph.store(
+        static_cast<float>(state.tremoloShape) * 0.01f
     );
 
     playbackGain.store(
@@ -650,6 +770,24 @@ void LooperComponent::applyMorphedState(
         ) * 0.01f
     );
 
+    tremoloRateHz.store(
+        static_cast<float>(
+            lerp(from.tremoloRateHz, to.tremoloRateHz)
+        )
+    );
+
+    tremoloDepth.store(
+        static_cast<float>(
+            lerp(from.tremoloDepthPercent, to.tremoloDepthPercent)
+        ) * 0.01f
+    );
+
+    tremoloShapeMorph.store(
+        static_cast<float>(
+            lerp(from.tremoloShape, to.tremoloShape)
+        ) * 0.01f
+    );
+
     playbackGain.store(
         juce::Decibels::decibelsToGain(
             static_cast<float>(
@@ -714,6 +852,21 @@ void LooperComponent::updateControlsForMorph(
     );
 
     show(
+        tremoloRateSlider,
+        lerp(from.tremoloRateHz, to.tremoloRateHz)
+    );
+
+    show(
+        tremoloDepthSlider,
+        lerp(from.tremoloDepthPercent, to.tremoloDepthPercent)
+    );
+
+    show(
+        tremoloShapeSlider,
+        lerp(from.tremoloShape, to.tremoloShape)
+    );
+
+    show(
         volumeSlider,
         lerp(from.volumeDecibels, to.volumeDecibels)
     );
@@ -753,6 +906,15 @@ void LooperComponent::prepare(double sampleRate, int maximumBlockSize)
     toneFilter.prepare(spec);
     toneFilter.reset();
     toneFilter.setResonance(0.707f);
+
+    // Lissage très court du gain de tremolo (~1,5 ms) : supprime le
+    // clic au rebouclage de la dent de scie sans émousser l'attaque.
+    tremoloSmoothingCoefficient = 1.0f - static_cast<float>(
+        std::exp(-1.0 / (tremoloSmoothingSeconds * sampleRate))
+    );
+
+    tremoloSmoothedGain = 1.0f;
+    tremoloPhase = 0.0;
 
     // Rampe de 50 ms sur le temps de delay : évite le clic quand on
     // tourne le potard.
@@ -816,6 +978,11 @@ void LooperComponent::startPlayback(int sampleLength)
     // Purge la queue du delay de la boucle précédente.
     delayLine.reset();
     toneFilter.reset();
+
+    // Les quatre voix repartent en phase ; elles dérivent ensuite selon
+    // leurs vitesses de tremolo respectives.
+    tremoloPhase = 0.0;
+    tremoloSmoothedGain = 1.0f;
 }
 
 float LooperComponent::fadeGainAt(double positionInPortion) const
@@ -879,6 +1046,7 @@ void LooperComponent::renderNextBlock(
     );
 
     applyFilter(numberOfSamples);
+    applyTremolo(numberOfSamples);
     applyDelay(numberOfSamples);
 
     // Volume, puis répartition stéréo à puissance constante (-3 dB au
@@ -1128,6 +1296,73 @@ float LooperComponent::shape(float x, float coldness)
     const float hard = juce::jlimit(-1.0f, 1.0f, x);
 
     return soft + coldness * (hard - soft);
+}
+
+float LooperComponent::tremoloShapeAt(double phase, float morph)
+{
+    // Sinus : part de 1, atteint 0 à mi-cycle, revient à 1. Doux.
+    const float sine = 0.5f * (
+        1.0f + std::cos(
+            2.0f * juce::MathConstants<float>::pi
+            * static_cast<float>(phase)
+        )
+    );
+
+    // Dent de scie inversée : part de 1 et décroît jusqu'à 0. C'est le
+    // rebouclage qui donne l'attaque franche.
+    const float saw = 1.0f - static_cast<float>(phase);
+
+    // Les deux valent 1 en phase 0 : le fondu est donc continu, et
+    // l'attaque se durcit progressivement avec morph.
+    return sine + morph * (saw - sine);
+}
+
+void LooperComponent::applyTremolo(int numberOfSamples)
+{
+    const float depth = juce::jlimit(0.0f, 1.0f, tremoloDepth.load());
+
+    auto* channelData = renderBuffer.getWritePointer(0);
+
+    if (depth <= 0.0f)
+    {
+        // Tremolo fermé : on garde le lissage et la phase à jour pour
+        // qu'il n'y ait pas de saut en le rouvrant.
+        tremoloSmoothedGain +=
+            tremoloSmoothingCoefficient * (1.0f - tremoloSmoothedGain);
+
+        const double increment =
+            tremoloRateHz.load() / currentSampleRate;
+
+        tremoloPhase += increment * numberOfSamples;
+        tremoloPhase -= std::floor(tremoloPhase);
+
+        return;
+    }
+
+    const float morph =
+        juce::jlimit(0.0f, 1.0f, tremoloShapeMorph.load());
+
+    const double increment = tremoloRateHz.load() / currentSampleRate;
+
+    for (int i = 0; i < numberOfSamples; ++i)
+    {
+        const float shape = tremoloShapeAt(tremoloPhase, morph);
+
+        // Modulation VERS LE BAS uniquement : le gain reste dans
+        // [1 - depth, 1] et ne dépasse jamais l'unité.
+        const float target = 1.0f - depth * (1.0f - shape);
+
+        tremoloSmoothedGain +=
+            tremoloSmoothingCoefficient
+            * (target - tremoloSmoothedGain);
+
+        channelData[i] *= tremoloSmoothedGain;
+
+        tremoloPhase += increment;
+
+        if (tremoloPhase >= 1.0)
+            tremoloPhase -= 1.0;
+    }
 }
 
 void LooperComponent::applyFilter(int numberOfSamples)

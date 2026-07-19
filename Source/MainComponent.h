@@ -154,14 +154,6 @@ private:
 
     static constexpr double defaultMasterDecibels = -12.0;
 
-    // Vu-mètre d'entrée.
-    std::atomic<float> inputLevel { 0.0f };
-    float displayedLevel = 0.0f;
-    juce::Rectangle<int> meterArea;
-
-    // Part du budget de callback audio réellement consommée.
-    float displayedCpuUsage = 0.0f;
-
     // Nombre de canaux réellement fournis par le périphérique, relu à
     // chaque prepareToPlay : brancher une interface stéréo en cours de
     // route est donc pris en compte.
