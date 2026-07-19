@@ -176,7 +176,7 @@ void LooperComponent::buildDelayControls()
     };
 
     configureKnob(feedbackSlider, feedbackLabel, "Feedback");
-    feedbackSlider.setRange(0.0, 95.0, 1.0);
+    feedbackSlider.setRange(0.0, 100.0, 1.0);
     feedbackSlider.setTextValueSuffix(" %");
     feedbackSlider.setValue(30.0);
 
@@ -236,7 +236,7 @@ void LooperComponent::buildMixControls()
     volumeSlider.setTextBoxStyle(
         juce::Slider::TextBoxBelow,
         false,
-        90,
+        70,
         18
     );
     volumeSlider.setValue(0.0);
@@ -266,7 +266,7 @@ void LooperComponent::buildMixControls()
     panSlider.setTextBoxStyle(
         juce::Slider::TextBoxBelow,
         false,
-        90,
+        70,
         18
     );
     panSlider.setValue(0.0);
@@ -292,6 +292,33 @@ void LooperComponent::buildMixControls()
     panLabel.setText("Pan", juce::dontSendNotification);
     panLabel.setJustificationType(juce::Justification::centred);
     panLabel.attachToComponent(&panSlider, false);
+
+    // Send vers la réverbe globale.
+    addAndMakeVisible(reverbSendSlider);
+    reverbSendSlider.setSliderStyle(
+        juce::Slider::RotaryHorizontalVerticalDrag
+    );
+    reverbSendSlider.setRange(0.0, 100.0, 1.0);
+    reverbSendSlider.setTextValueSuffix(" %");
+    reverbSendSlider.setTextBoxStyle(
+        juce::Slider::TextBoxBelow,
+        false,
+        70,
+        18
+    );
+    reverbSendSlider.setValue(0.0);
+
+    reverbSendSlider.onValueChange = [this]
+    {
+        reverbSend.store(
+            static_cast<float>(reverbSendSlider.getValue()) * 0.01f
+        );
+    };
+
+    addAndMakeVisible(reverbSendLabel);
+    reverbSendLabel.setText("Send", juce::dontSendNotification);
+    reverbSendLabel.setJustificationType(juce::Justification::centred);
+    reverbSendLabel.attachToComponent(&reverbSendSlider, false);
 }
 
 //==============================================================================
@@ -366,13 +393,20 @@ void LooperComponent::resized()
     toneSlider.setBounds(toneArea.reduced(6, 0));
     delayMixSlider.setBounds(delayBottomRow.reduced(6, 0));
 
-    // Mix : volume + panoramique.
+    // Mix : volume + panoramique + send réverbe.
     area.removeFromTop(24);
     auto mixKnobs = area.removeFromTop(90);
-    auto volumeArea = mixKnobs.removeFromLeft(mixKnobs.getWidth() / 2);
+    const int mixKnobWidth = mixKnobs.getWidth() / 3;
 
-    volumeSlider.setBounds(volumeArea.reduced(6, 0));
-    panSlider.setBounds(mixKnobs.reduced(6, 0));
+    volumeSlider.setBounds(
+        mixKnobs.removeFromLeft(mixKnobWidth).reduced(3, 0)
+    );
+
+    panSlider.setBounds(
+        mixKnobs.removeFromLeft(mixKnobWidth).reduced(3, 0)
+    );
+
+    reverbSendSlider.setBounds(mixKnobs.reduced(3, 0));
 }
 
 //==============================================================================
@@ -556,6 +590,7 @@ float LooperComponent::fadeGainAt(double positionInPortion) const
 
 void LooperComponent::renderNextBlock(
     juce::AudioBuffer<float>& outputBuffer,
+    juce::AudioBuffer<float>& reverbSendBuffer,
     int startSample,
     int numberOfSamples,
     const float* sampleData,
@@ -624,6 +659,29 @@ void LooperComponent::renderNextBlock(
             rightGain
         );
     }
+
+    // Send vers la réverbe, pris après volume et pan : le placement
+    // stéréo de la voix est donc conservé dans la réverbe.
+    const float send = reverbSend.load();
+
+    if (send <= 0.0f || reverbSendBuffer.getNumChannels() < 2)
+        return;
+
+    reverbSendBuffer.addFrom(
+        0,
+        0,
+        mono,
+        numberOfSamples,
+        leftGain * send
+    );
+
+    reverbSendBuffer.addFrom(
+        1,
+        0,
+        mono,
+        numberOfSamples,
+        rightGain * send
+    );
 }
 
 void LooperComponent::readSampleIntoRenderBuffer(
@@ -758,11 +816,16 @@ void LooperComponent::applyDelay(int numberOfSamples)
         const float delayed = delayLine.popSample(0);
 
         // Réinjection : le tone est DANS la boucle (chaque répétition
-        // est filtrée une fois de plus), mais PAS la saturation, qui
-        // se cumulerait à chaque tour.
+        // est filtrée une fois de plus), mais PAS la saturation de
+        // couleur, qui se cumulerait à chaque tour.
         const float fedBack = toneFilter.processSample(0, delayed);
 
-        delayLine.pushSample(0, dry + fedBack * feedback);
+        // L'écrêteur borne ce qui entre dans la ligne : c'est lui qui
+        // rend le feedback à 100 % stable au lieu de divergent.
+        delayLine.pushSample(
+            0,
+            softClip(dry + fedBack * feedback)
+        );
 
         // Saturation appliquée au seul signal retardé. Le fondu par
         // amount garantit qu'à saturation nulle le delay reste
@@ -778,6 +841,28 @@ void LooperComponent::applyDelay(int numberOfSamples)
 
         channelData[i] = dry + wet * mix;
     }
+}
+
+float LooperComponent::softClip(float x)
+{
+    const float magnitude = std::abs(x);
+
+    // En dessous du seuil : strictement l'identité. La boucle reste
+    // donc parfaitement propre tant qu'elle ne s'emballe pas.
+    if (magnitude <= loopClipThreshold)
+        return x;
+
+    const float headroom = 1.0f - loopClipThreshold;
+
+    // Au-dessus : saturation douce, asymptotique à 1,0. C'est ce qui
+    // fait qu'une boucle à gain unitaire se stabilise au lieu de
+    // diverger.
+    const float excess = (magnitude - loopClipThreshold) / headroom;
+
+    const float clipped =
+        loopClipThreshold + headroom * std::tanh(excess);
+
+    return x < 0.0f ? -clipped : clipped;
 }
 
 float LooperComponent::shape(float x, float coldness)

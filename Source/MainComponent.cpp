@@ -49,6 +49,65 @@ MainComponent::MainComponent()
     );
     masterVolumeLabel.attachToComponent(&masterVolumeSlider, false);
 
+    // --- Réverbe à ressort ---
+
+    auto configureKnob = [this](juce::Slider& slider, juce::Label& label,
+                                const juce::String& text)
+    {
+        addAndMakeVisible(slider);
+        slider.setSliderStyle(
+            juce::Slider::RotaryHorizontalVerticalDrag
+        );
+        slider.setTextBoxStyle(
+            juce::Slider::TextBoxBelow,
+            false,
+            80,
+            18
+        );
+
+        addAndMakeVisible(label);
+        label.setText(text, juce::dontSendNotification);
+        label.setJustificationType(juce::Justification::centred);
+        label.attachToComponent(&slider, false);
+    };
+
+    configureKnob(reverbToneSlider, reverbToneLabel, "Rev Tone");
+    reverbToneSlider.setRange(0.0, 100.0, 1.0);
+    reverbToneSlider.setTextValueSuffix(" %");
+    reverbToneSlider.setValue(50.0);
+
+    reverbToneSlider.onValueChange = [this]
+    {
+        reverbTone.store(
+            static_cast<float>(reverbToneSlider.getValue()) * 0.01f
+        );
+    };
+
+    configureKnob(reverbTimeSlider, reverbTimeLabel, "Rev Time");
+    reverbTimeSlider.setRange(0.3, 16.0, 0.1);
+    reverbTimeSlider.setSkewFactorFromMidPoint(3.0);
+    reverbTimeSlider.setTextValueSuffix(" s");
+    reverbTimeSlider.setValue(2.0);
+
+    reverbTimeSlider.onValueChange = [this]
+    {
+        reverbTime.store(
+            static_cast<float>(reverbTimeSlider.getValue())
+        );
+    };
+
+    addAndMakeVisible(reverbSoloButton);
+    reverbSoloButton.setClickingTogglesState(true);
+    reverbSoloButton.setColour(
+        juce::TextButton::buttonOnColourId,
+        juce::Colours::orangered
+    );
+
+    reverbSoloButton.onClick = [this]
+    {
+        reverbSolo.store(reverbSoloButton.getToggleState());
+    };
+
     // setSize déclenche resized() : il doit venir APRÈS la création des
     // enfants, sinon les loopers n'existent pas encore et restent sans
     // bounds.
@@ -188,6 +247,22 @@ void MainComponent::prepareToPlay(
     limiter.reset();
     limiter.setThreshold(-1.0f);
     limiter.setRelease(100.0f);
+
+    reverbSendBuffer.setSize(
+        2,
+        samplesPerBlockExpected,
+        false,
+        true,
+        false
+    );
+
+    reverbSendBuffer.clear();
+
+    // Facteurs volontairement non harmoniquement liés : c'est ce qui
+    // décorrèle les deux canaux et ouvre l'image stéréo. Avec des
+    // ressorts identiques, la réverbe serait du dual-mono.
+    reverbLeft.prepare(sampleRate, samplesPerBlockExpected, 0.87f);
+    reverbRight.prepare(sampleRate, samplesPerBlockExpected, 1.23f);
 }
 
 void MainComponent::getNextAudioBlock(
@@ -231,16 +306,65 @@ void MainComponent::getNextAudioBlock(
         // chaque looper ajoute sa contribution.
         buffer->clear(startSample, numberOfSamples);
 
+        // Le bus de réverbe repart du silence à chaque bloc : les voix
+        // y additionnent leur send.
+        reverbSendBuffer.clear(0, numberOfSamples);
+
         const float* sampleData = recordingBuffer.getReadPointer(0);
 
         for (auto* looper : loopers)
         {
             looper->renderNextBlock(
                 *buffer,
+                reverbSendBuffer,
                 startSample,
                 numberOfSamples,
                 sampleData,
                 recordedLength
+            );
+        }
+
+        // Solo : on coupe le signal direct. C'est fait APRÈS le rendu
+        // des voix, donc les sends ont déjà été prélevés : la réverbe
+        // reste alimentée normalement.
+        if (reverbSolo.load())
+            buffer->clear(startSample, numberOfSamples);
+
+        // Retour de réverbe : deux instances mono indépendantes, une
+        // par canal. Le retour est à l'unité ; c'est le send de chaque
+        // voix qui dose la quantité de réverbe.
+        //
+        // La réverbe tourne en continu, même sans send actif : couper
+        // son traitement tronquerait brutalement la queue en cours.
+        const float tone = reverbTone.load();
+        const float time = reverbTime.load();
+
+        reverbLeft.setTone(tone);
+        reverbLeft.setTime(time);
+        reverbRight.setTone(tone);
+        reverbRight.setTime(time);
+
+        reverbLeft.process(
+            reverbSendBuffer.getWritePointer(0),
+            numberOfSamples
+        );
+
+        reverbRight.process(
+            reverbSendBuffer.getWritePointer(1),
+            numberOfSamples
+        );
+
+        for (int channel = 0;
+             channel < juce::jmin(2, buffer->getNumChannels());
+             ++channel)
+        {
+            buffer->addFrom(
+                channel,
+                startSample,
+                reverbSendBuffer,
+                channel,
+                0,
+                numberOfSamples
             );
         }
 
@@ -414,6 +538,22 @@ void MainComponent::paint(juce::Graphics& graphics)
         juce::Justification::centred
     );
 
+    // Charge CPU : part du budget de callback audio consommée.
+    const float cpuPercent = displayedCpuUsage * 100.0f;
+
+    graphics.setColour(
+        cpuPercent > 70.0f ? juce::Colours::orangered
+                           : juce::Colours::lightgrey
+    );
+
+    graphics.setFont(juce::FontOptions(15.0f));
+
+    graphics.drawText(
+        "CPU audio : " + juce::String(cpuPercent, 1) + " %",
+        bounds.removeFromBottom(24),
+        juce::Justification::centred
+    );
+
     auto meterBounds = bounds
         .withSizeKeepingCentre(60, bounds.getHeight())
         .toFloat();
@@ -445,8 +585,25 @@ void MainComponent::resized()
 
     auto topRow = area.removeFromTop(150);
 
-    auto masterArea = topRow.removeFromRight(180);
-    masterVolumeSlider.setBounds(masterArea.reduced(35, 30));
+    // À droite : master + les deux réglages de réverbe.
+    auto knobStrip = topRow.removeFromRight(510);
+    const int topKnobWidth = knobStrip.getWidth() / 3;
+
+    masterVolumeSlider.setBounds(
+        knobStrip.removeFromLeft(topKnobWidth).reduced(25, 28)
+    );
+
+    reverbToneSlider.setBounds(
+        knobStrip.removeFromLeft(topKnobWidth).reduced(25, 28)
+    );
+
+    reverbTimeSlider.setBounds(knobStrip.reduced(25, 28));
+
+    auto soloArea = topRow.removeFromRight(130);
+
+    reverbSoloButton.setBounds(
+        soloArea.withSizeKeepingCentre(110, 36)
+    );
 
     meterArea = topRow;
 
@@ -469,6 +626,9 @@ void MainComponent::timerCallback()
         displayedLevel *= 0.90f;
 
     displayedLevel = juce::jlimit(0.0f, 1.0f, displayedLevel);
+
+    displayedCpuUsage =
+        static_cast<float>(deviceManager.getCpuUsage());
 
     repaint(meterArea);
 }

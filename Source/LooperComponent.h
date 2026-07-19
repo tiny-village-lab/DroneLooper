@@ -32,10 +32,14 @@ public:
 
     // --- Thread audio ---
 
-    // Ajoute la contribution de cette voix dans outputBuffer (stéréo).
+    // Ajoute la contribution de cette voix dans outputBuffer (stéréo),
+    // et sa part de send dans reverbSendBuffer (stéréo, indexé depuis 0).
+    // Le send est pris APRÈS volume et pan, comme sur une console : une
+    // voix pannée à gauche alimente surtout la réverbe de gauche.
     // sampleData / sampleLength décrivent l'échantillon partagé.
     void renderNextBlock(
         juce::AudioBuffer<float>& outputBuffer,
+        juce::AudioBuffer<float>& reverbSendBuffer,
         int startSample,
         int numberOfSamples,
         const float* sampleData,
@@ -74,6 +78,12 @@ private:
     // Contient aussi la saturation, appliquée au SEUL signal retardé,
     // après la ligne à retard et hors de la boucle de réinjection.
     void applyDelay(int numberOfSamples);
+
+    // Écrêteur doux placé DANS la boucle de réinjection. Ce n'est pas
+    // une couleur : il est strictement linéaire en dessous du seuil, et
+    // ne sert qu'à borner le niveau. C'est lui qui permet un feedback à
+    // 100 % : au lieu de diverger, la boucle se stabilise et oscille.
+    static float softClip(float x);
 
     // Courbe de transfert de la saturation. coldness morphe entre une
     // courbe douce (chaud, harmoniques paires via l'asymétrie) et un
@@ -123,6 +133,8 @@ private:
     juce::Label volumeLabel;
     juce::Slider panSlider;
     juce::Label panLabel;
+    juce::Slider reverbSendSlider;
+    juce::Label reverbSendLabel;
 
     // Paramètres publiés par l'UI, relus par le thread audio.
     std::atomic<float> playbackSpeed { 1.0f };
@@ -131,6 +143,7 @@ private:
     std::atomic<float> resonanceValue { 0.707f };
     std::atomic<float> playbackGain { 1.0f };
     std::atomic<float> panPosition { 0.0f }; // -1 gauche, +1 droite.
+    std::atomic<float> reverbSend { 0.0f };
 
     std::atomic<float> delayTimeMs { 300.0f };
     std::atomic<float> feedbackAmount { 0.0f };
@@ -173,7 +186,14 @@ private:
     static constexpr double minPortionFraction = 0.1; // 10 %.
 
     static constexpr double maxDelaySeconds = 2.0;
-    static constexpr float maxFeedback = 0.95f; // Évite l'emballement.
+
+    // 100 % est désormais sûr : l'écrêteur de boucle borne le niveau.
+    static constexpr float maxFeedback = 1.0f;
+
+    // Seuil de l'écrêteur de boucle. En dessous, la boucle est
+    // parfaitement transparente ; au-dessus, elle sature en douceur
+    // jusqu'à un plafond de 1,0.
+    static constexpr float loopClipThreshold = 0.7f;
 
     // --- Réglage de la couleur de la saturation (à ajuster à l'oreille) ---
 

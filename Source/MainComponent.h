@@ -5,6 +5,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "LooperComponent.h"
+#include "SpringReverb.h"
 
 // Détient ce qui est PARTAGÉ entre toutes les voix :
 //  - l'échantillon enregistré (un seul, lu par tous les loopers),
@@ -80,6 +81,28 @@ private:
     juce::Label masterVolumeLabel;
     std::atomic<float> masterGain { 1.0f };
 
+    // Réverbe à ressort, alimentée par les sends des voix. Deux
+    // instances mono (gauche / droite) plutôt qu'une stéréo : ça laisse
+    // la possibilité de les régler séparément plus tard.
+    SpringReverb reverbLeft;
+    SpringReverb reverbRight;
+
+    juce::AudioBuffer<float> reverbSendBuffer;
+
+    juce::Slider reverbToneSlider;
+    juce::Label reverbToneLabel;
+    juce::Slider reverbTimeSlider;
+    juce::Label reverbTimeLabel;
+
+    // Solo : coupe le signal direct, on n'entend plus que le wet.
+    juce::TextButton reverbSoloButton { "Solo Rev" };
+    std::atomic<bool> reverbSolo { false };
+
+    // Le retour de réverbe est à l'unité : le dosage se fait
+    // uniquement via les sends de chaque voix.
+    std::atomic<float> reverbTone { 0.5f };
+    std::atomic<float> reverbTime { 2.0f };
+
     // Filet de sécurité : empêche toute saturation numérique si on
     // remonte les volumes.
     juce::dsp::Limiter<float> limiter;
@@ -90,6 +113,9 @@ private:
     std::atomic<float> inputLevel { 0.0f };
     float displayedLevel = 0.0f;
     juce::Rectangle<int> meterArea;
+
+    // Part du budget de callback audio réellement consommée.
+    float displayedCpuUsage = 0.0f;
 
     // Nombre de canaux réellement fournis par le périphérique, relu à
     // chaque prepareToPlay : brancher une interface stéréo en cours de

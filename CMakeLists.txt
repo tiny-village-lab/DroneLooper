@@ -18,6 +18,7 @@ target_sources(DroneLooper
         Source/Main.cpp
         Source/MainComponent.cpp
         Source/LooperComponent.cpp
+        Source/SpringReverb.cpp
 )
 
 target_compile_definitions(DroneLooper
